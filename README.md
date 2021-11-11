@@ -4,10 +4,12 @@ Pythonic tools for design using numpy arrays and discrete volume elements "voxel
 
 
 ## Visuals
-
+![](images/demo1.png)
 
 ## Installation
-
+```
+python setup.py install
+```
 
 ## Authors and acknowledgment
 
