@@ -9,9 +9,8 @@ class GyroidCube(Cube):
                  structure_param=0.0, 
                  thresh1=0.0, 
                  thresh2=None, 
-                 res=32, 
                  **kwargs):
-        super().__init__(size,res, **kwargs)
+        super().__init__(size, **kwargs)
         self.lattice_param = lattice_param
         self.structure_param = structure_param
         self.thresh1 = thresh1

@@ -24,6 +24,7 @@ def launch_shell(debug=False):
         cfg = Config()
         cfg.InteractiveShellApp.exec_lines = [
              #"%pylab tk",
+             "from voxelcad.environment import Environment as ENV",
              "from voxelcad.sphere import Sphere",
              "from voxelcad.cube import Cube",
              "from voxelcad.gyroid_cube import GyroidCube",

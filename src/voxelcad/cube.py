@@ -1,12 +1,15 @@
 import numpy as np
 
+from .environment import Environment as ENV
 from .voxel_model import VoxelModel
 from .voxel_grid  import VoxelGrid
 
 class Cube(VoxelModel):
-    def __init__(self, size, res=32, centered=False, **kwargs):
+    def __init__(self, size, res=None, centered=False, **kwargs):
         super().__init__(**kwargs)
         self.size_vector = sv = np.array(size)*np.ones(3)
+        if res is None:
+            res = ENV.res
         self.res_vector  = np.array(res)*np.ones(3)
         self.centered = centered
         #construct_grid

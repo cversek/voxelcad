@@ -1,13 +1,15 @@
 import numpy as np
-from numpy.lib.twodim_base import _trilu_dispatcher
 
+from .environment import Environment as ENV
 from .voxel_model import VoxelModel
 from .voxel_grid  import VoxelGrid
 
 class Sphere(VoxelModel):
-    def __init__(self, r, res=32, **kwargs):
+    def __init__(self, r, res=None, **kwargs):
         super().__init__(**kwargs)
         self.size_vector = np.array(2*r)*np.ones(3)
+        if res is None:
+            res = ENV.res
         self.res_vector  = np.array(res)*np.ones(3)
         self.r = r
         #construct_grid
