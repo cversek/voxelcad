@@ -1,13 +1,17 @@
 import numpy as np
 
 class VoxelGrid:
-    def __init__(self, xlim,ylim,zlim,res):
+    def __init__(self, xlim,ylim,zlim,res,margin=1):
         assert(xlim[0] < xlim[1]);assert(ylim[0] < ylim[1]);assert(zlim[0] < zlim[1])
         self.xlim = np.array(xlim)
         self.ylim = np.array(ylim)
         self.zlim = np.array(zlim)
         assert(self.xlim.shape == self.ylim.shape == self.zlim.shape == (2,))
-        self.res_vector  = np.array(res)*np.ones(3)
+        self.res_vector  = (np.array(res)*np.ones(3)).astype('uint')
+        #NOTE must have a 1 voxel margin at edges for surface algos to work properly
+        margin = int(margin)
+        assert(margin >= 1)
+        self.margin = margin
         
     def compute_size_vector(self):
         x0,x1 = self.xlim; y0,y1 = self.ylim; z0,z1 = self.zlim
@@ -17,11 +21,18 @@ class VoxelGrid:
         x0,x1 = self.xlim; y0,y1 = self.ylim; z0,z1 = self.zlim
         return np.array(((x0+x1)/2,(y0+y1)/2,(z0+z1)/2))
         
-    def construct_mesh(self):
+    def construct_mesh(self, make_empty_voxels=True, voxel_dtype = 'bool'):   
         r0,r1,r2 = self.res_vector
         x0,x1 = self.xlim; y0,y1 = self.ylim; z0,z1 = self.zlim
-        return np.mgrid[x0:x1:r0*1j, y0:y1:r1*1j, z0:z1:r2*1j]
-        
+        X,Y,Z =  np.mgrid[x0:x1:r0*1j, y0:y1:r1*1j, z0:z1:r2*1j]
+        if make_empty_voxels:
+            #build an empty voxel array with a margin
+            m = self.margin
+            V = np.zeros(self.res_vector+2*m).astype(voxel_dtype)
+            return (X,Y,Z,V,m)
+        else:
+            return (X,Y,Z)
+
     def __or__(self, other): #union
         #create a bounding cube of maximal resolution
         r0   = max(self.res_vector[0],other.res_vector[0])
