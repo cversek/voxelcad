@@ -1,6 +1,8 @@
 import numpy as np
 from numpy import sin, cos, pi
 
+from .debug import currentframe, DEBUG_TAG, DEBUG_EMBED
+
 from .cube import Cube
 
 class GyroidCube(Cube):
@@ -19,16 +21,19 @@ class GyroidCube(Cube):
     def render_volume(self):
         # REF https://forum.freecadweb.org/viewtopic.php?t=19819#p233282
         super().render_volume()
-        X,Y,Z = self.grid.construct_mesh()
+        X,Y,Z,V,m = self.grid.construct_mesh()
+        # the gyroid is defined as continuous function on the mesh
         a = pi*self.lattice_param
-        I = cos(a*X)*sin(a*Y) + cos(a*Y)*sin(a*Z) + cos(a*Z)*sin(a*X) - self.structure_param
-        #threshold to make solid
+        F = cos(a*X)*sin(a*Y) + cos(a*Y)*sin(a*Z) + cos(a*Z)*sin(a*X) - self.structure_param
+        # threshold to make solid and fill space between margins
         if self.thresh1 is not None and self.thresh2 is not None:
-            self.voxel_data = (self.thresh1 < I) & (I > self.thresh2) 
+            V[m:-m,m:-m,m:-m] = (F > self.thresh1) & (F < self.thresh2) 
         elif self.thresh1 is not None:
-            self.voxel_data = (I > self.thresh1)
+            V[m:-m,m:-m,m:-m] = (F > self.thresh1)
         else:
             raise ValueError("Either or both thresh1, thresh2 should not be None")
+        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
+        self.voxel_data = V
         return self.voxel_data
 
 ################################################################################
