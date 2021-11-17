@@ -3,7 +3,8 @@ import numpy as np
 import logging
 LOGGER = logging.getLogger(__name__)
 
-from .debug import currentframe, DEBUG_TAG, DEBUG_EMBED
+from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED
+from voxelcad.voxel_grid import VoxelGrid
 
 
 class VoxelModel:
@@ -54,30 +55,58 @@ class VoxelModel:
                 rendered_mesh.vectors[i][j] = verts[f[j],:]
         return rendered_mesh
         
-    def plot(self, show=True, style = "trisurf", axis = None, figure = None, edgecolor='k'):
-        verts, faces, normals, values = self.render_surface()
-        import matplotlib.pyplot as plt
-        #setup figure and axis
-        if axis is None and figure is None:
-            figure = plt.figure()
-        if axis is None:
-             axis = figure.add_subplot(111, projection='3d')
+    def plot(self, style = None, axis = None, figure = None,**kwargs):
+        if style is not None:
+            self._plot_style(style,figure,axis)
+        else:
+            #try plotting in preference order, with fallback
+            for style in ['vtk-mesh','trisurf','poly3d']:
+                try:
+                    figure = self._plot_style(style,figure,axis,**kwargs)
+                    return figure
+                except Exception as exc:
+                    LOGGER.warning(f"plot: caught exception '{exc}', continuing...")
+
+    def _plot_style(self,style,figure,axis,**kwargs):
         #plot in the chosen style
-        if style == "poly3d": #REF: https://scikit-image.org/docs/dev/auto_examples/edges/plot_marching_cubes.html
-            from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-            mesh = Poly3DCollection(verts[faces])
-            mesh.set_edgecolor(edgecolor)
-            axis.add_collection3d(mesh)
-            axis.set_xlim(*self.grid.xlim)  
-            axis.set_ylim(*self.grid.ylim)
-            axis.set_zlim(*self.grid.zlim)   
-        elif style == "trisurf":
-            #from mpl_toolkits.mplot3d import Axes3D
-            axis.plot_trisurf(verts[:, 0], verts[:, 1], faces, verts[:, 2], cmap='ocean', lw=1)
-        #finish formating axes
-        if show:
-            plt.show()
-        return figure
+        if style == 'vtk-mesh':
+            import vtkplotlib as vpl
+            #render mesh data
+            mesh = self.render_mesh()
+            #setup vtkplot figure
+            if figure is None:
+                figure = vpl.figure()
+            #plot the style
+            vpl.mesh_plot(mesh)
+            #show if requested
+            if kwargs.get('show',True):
+                vpl.show(block=kwargs.get('block',True)) #FIXME blocking is needed for interaction, limitation of vpl?
+            return figure
+
+        elif style in ['trisurf','poly3d']:
+            import matplotlib.pyplot as plt
+            #render surface data
+            verts, faces, normals, values = self.render_surface()
+            #setup matplotlib figure and axis
+            if axis is None and figure is None:
+                figure = plt.figure()
+            if axis is None:
+                axis = figure.add_subplot(111, projection='3d')
+            #plot the style
+            if style == 'trisurf':
+                axis.plot_trisurf(verts[:, 0], verts[:, 1], faces, verts[:, 2], cmap='ocean', lw=1)
+            elif style == 'poly3d': #REF: https://scikit-image.org/docs/dev/auto_examples/edges/plot_marching_cubes.html
+                from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+                mesh = Poly3DCollection(verts[faces])
+                mesh.set_edgecolor(edgecolor)
+                axis.add_collection3d(mesh)
+                axis.set_xlim(*self.grid.xlim)  
+                axis.set_ylim(*self.grid.ylim)
+                axis.set_zlim(*self.grid.zlim)   
+            #finish formating axes
+            if kwargs.get('show',True):
+                plt.show()
+            return figure
         
     def export(self, filename):
         if filename.endswith(".nii"): #NIfTi
@@ -105,10 +134,51 @@ class VoxelModel:
         J = np.where(in_bounds, np.floor(r_y*(Y-y0)/(y1-y0)).astype('int'),-1)
         K = np.where(in_bounds, np.floor(r_z*(Z-z0)/(z1-z0)).astype('int'),-1)
         #use indices to interpolate the voxel data between the margins
+        if self.voxel_data is None:  #render the voxels first
+            self.render_volume()
         m = self.grid.margin
         V = self.voxel_data[m:-m,m:-m,m:-m]
         in_volume = np.where(in_bounds,V[I,J,K],False)
         return in_volume
+
+    def rotate_z(self, degrees):
+        #construct the rotation matrix and its inverse
+        theta = np.radians(degrees)
+        c, s = np.cos(theta), np.sin(theta)
+        R = np.array(((0,c,-s),(0,s,c),(0,0,1.0)))
+        #rotate the bounding box corners
+        x0,x1 = self.grid.xlim; y0,y1 = self.grid.ylim; z0,z1 = self.grid.zlim
+        C = np.array((
+            (x0,y0,z0),
+            (x1,y0,z0),
+            (x0,y1,z0),
+            (x1,y1,z0),
+            (x0,y0,z1),
+            (x1,y0,z1),
+            (x0,y1,z1),
+            (x1,y1,z1)
+        ))
+        Cr = np.dot(C,R.T) #apply rotation matrix
+        
+        DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
+        #create a new rotated grid with maximal resolution
+        r_x, r_y, r_z = self.res_vector
+        r_max = max(r_x, r_y, r_z)
+        xlim,ylim,zlim = (v0r[0],v1r[0]),(v0r[1],v1r[1]),(v0r[2],v1r[2])
+        rot_grid = VoxelGrid(xlim,ylim,zlim,res=r_max)
+        Xr,Yr,Zr = rot_grid.construct_mesh(make_empty_voxels=False)
+        #invert the rotation to map back to the orginal data space
+        c_inv, s_inv = np.cos(-theta), np.sin(-theta)
+        X =  c_inv*Xr + s_inv*Yr  # "clockwise"
+        Y = -s_inv*Xr + c_inv*Yr
+        Z = Zr
+        #test if the new mesh points are contained in the volume
+        rot_voxel_data = self.test_points(X,Y,Z)
+        DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
+        return VoxelModel(grid=rot_grid,voxel_data=rot_voxel_data)
+        
+
+
             
     def __or__(self, other): #union
         self.render_volume()  #FIXME this should only be done in necessary
