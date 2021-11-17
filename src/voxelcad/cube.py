@@ -1,23 +1,23 @@
 import numpy as np
 
-from .environment import Environment as ENV
-from .voxel_model import VoxelModel
-from .voxel_grid  import VoxelGrid
+import voxelcad.environment as ENV
 
-from .debug import currentframe, DEBUG_TAG, DEBUG_EMBED
+from voxelcad.voxel_model import VoxelModel
+from voxelcad.voxel_grid  import VoxelGrid
 
+from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED
 
 class Cube(VoxelModel):
-    def __init__(self, size, res=None, centered=False, **kwargs):
+    def __init__(self, size, res=None, center=False, **kwargs):
         super().__init__(**kwargs)
         self.size_vector = sv = np.array(size)*np.ones(3)
         if res is None:
             res = ENV.res
         self.res_vector  = (np.array(res)*np.ones(3)).astype('uint')
-        self.centered = centered
+        self.center = center
         #set up grid dimensions
         sv = self.size_vector
-        if self.centered:
+        if self.center:
             sx,sy,sz = sv/2
             self.grid = VoxelGrid(xlim=(-sx,sx),
                                   ylim=(-sy,sy),
@@ -31,8 +31,8 @@ class Cube(VoxelModel):
                                   res=self.res_vector)
         
     def render_volume(self):
-        super().render_volume() #will construct_grid if it is None
-        #fill all of the cubic volume between the margins
+        super().render_volume() # will construct_grid if it is None
+        # fill all of the cubic volume between the margins
         X,Y,Z,V,m = self.grid.construct_mesh()
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         V[m:-m,m:-m,m:-m] = (X <= self.size_vector[0]) & \
