@@ -24,9 +24,10 @@ def launch_shell(debug=False):
         cfg = Config()
         cfg.InteractiveShellApp.exec_lines = [
              #"%pylab tk",
-             "from voxelcad.environment import Environment as ENV",
-             "from voxelcad.sphere import Sphere",
+             "import voxelcad.environment as ENV",
              "from voxelcad.cube import Cube",
+             "from voxelcad.sphere import Sphere",
+             "from voxelcad.cylinder import Cylinder",
              "from voxelcad.gyroid_cube import GyroidCube",
         ]
         IPython.start_ipython(argv=['--pylab'],config = cfg)
