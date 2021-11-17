@@ -1,9 +1,9 @@
 import numpy as np
 from numpy import sin, cos, pi
 
-from .debug import currentframe, DEBUG_TAG, DEBUG_EMBED
+from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED
 
-from .cube import Cube
+from voxelcad.cube import Cube
 
 class GyroidCube(Cube):
     def __init__(self, size, 
