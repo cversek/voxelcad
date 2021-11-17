@@ -1,8 +1,9 @@
 import numpy as np
 
-from .environment import Environment as ENV
-from .voxel_model import VoxelModel
-from .voxel_grid  import VoxelGrid
+import voxelcad.environment as ENV
+
+from voxelcad.voxel_model import VoxelModel
+from voxelcad.voxel_grid  import VoxelGrid
 
 class Sphere(VoxelModel):
     def __init__(self, r, res=None, **kwargs):
@@ -10,7 +11,7 @@ class Sphere(VoxelModel):
         self.size_vector = np.array(2*r)*np.ones(3)
         if res is None:
             res = ENV.res
-        self.res_vector  = np.array(res)*np.ones(3)
+        self.res_vector  = (np.array(res)*np.ones(3)).astype('uint')
         self.r = r
         #construct_grid
         sx,sy,sz = self.size_vector/2
