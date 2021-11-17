@@ -12,5 +12,7 @@ python setup.py install
 ```
 
 ## Authors and acknowledgment
+"Craig Versek" <cversek@gmail.com>
 
 ## License
+MIT
