@@ -1,5 +1,5 @@
 import numpy as np
-from numpy import sin, cos, pi
+from numpy import sin, cos, tan, pi
 
 from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED
 
@@ -24,12 +24,64 @@ class GyroidCube(Cube):
         X,Y,Z,V,m = self.grid.construct_mesh()
         # the gyroid is defined as continuous function on the mesh
         a = pi*self.lattice_param
-        F = cos(a*X)*sin(a*Y) + cos(a*Y)*sin(a*Z) + cos(a*Z)*sin(a*X) - self.structure_param
+        X *= a
+        Y *= a
+        Z *= a
+        F = cos(X)*sin(Y) + cos(Y)*sin(Z) + cos(Z)*sin(X) - self.structure_param
         # threshold to make solid and fill space between margins
         if self.thresh1 is not None and self.thresh2 is not None:
-            V[m:-m,m:-m,m:-m] = (F > self.thresh1) & (F < self.thresh2) 
+            V[m:-m,m:-m,m:-m] =  ((F > self.thresh1) & (F < self.thresh2))
         elif self.thresh1 is not None:
-            V[m:-m,m:-m,m:-m] = (F > self.thresh1)
+            V[m:-m,m:-m,m:-m] = (F > 0) | (F < self.thresh1)
+        else:
+            raise ValueError("Either or both thresh1, thresh2 should not be None")
+        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
+        self.voxel_data = V
+        return self.voxel_data
+
+class WigglyGyroidCube(GyroidCube):
+    def __init__(self, size,
+                 w_freq   = 5,
+                 w_expon  = 3,
+                 w_amp    = 0.5, 
+                 **kwargs):
+        super().__init__(size,**kwargs)
+        self.w_freq   = w_freq
+        self.w_expon  = w_expon
+        self.w_amp    = w_amp
+
+    def render_volume(self):
+        # REF https://forum.freecadweb.org/viewtopic.php?t=19819#p233282
+        super().render_volume()
+        X,Y,Z,V,m = self.grid.construct_mesh()
+        # the gyroid is defined as continuous function on the mesh
+        a = pi*self.lattice_param
+        b = self.w_freq
+        p = self.w_expon
+        Aw = self.w_amp
+        #precompute some useful quantities
+        X *= a
+        Y *= a
+        Z *= a
+        cosX = cos(X);cosY = cos(Y);cosZ = cos(Z)
+        sinX = sin(X);sinY = sin(Y);sinZ = sin(Z)
+        bX,bY,bZ = (b*X,b*Y,b*Z)
+        gradX = cosZ*cosX - sinX*sinY
+        gradY = cosX*cosY - sinY*sinZ
+        gradZ = cosY*cosZ - sinZ*sinX
+        #wiggle along the gradient direction (normal to surface)
+        wx = Aw*(cos(bY)*sin(bZ))**p
+        wy = Aw*(sin(bX)*cos(bZ))**p
+        wz = Aw*(cos(bX)*sin(bY))**p
+        Ffunc  = lambda x,y,z: cos(x)*sin(y) + cos(y)*sin(z) + cos(z)*sin(x) - self.structure_param
+        Fw1 = Ffunc(X - wx*gradX,Y - wy*gradY,Z - wz*gradZ)
+        Fw2 = Ffunc(X + wx*gradX,Y + wy*gradY,Z + wz*gradZ)
+        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
+        # threshold to make solid and fill space between margins
+        if self.thresh1 is not None and self.thresh2 is not None:
+            V[m:-m,m:-m,m:-m] =  ((Fw1 > self.thresh1) & (Fw1 < self.thresh2)) | ((Fw2 > self.thresh1) & (Fw2 < self.thresh2))
+        #elif self.thresh1 is not None:
+        #    V[m:-m,m:-m,m:-m] = (F(X,Y,Z) > 0) | (F(Xw,Yw,Zw) > self.thresh1)
         else:
             raise ValueError("Either or both thresh1, thresh2 should not be None")
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
