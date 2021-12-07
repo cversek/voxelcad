@@ -1,16 +1,27 @@
+from typing import OrderedDict
 import numpy as np
 
-import logging
-LOGGER = logging.getLogger(__name__)
+import voxelcad.environment as ENV
 
 from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED
 from voxelcad.voxel_grid import VoxelGrid
 
+import logging
+LOGGER = logging.getLogger(__name__)
 
 class VoxelModel:
-    def __init__(self, grid = None, voxel_data = None):
+    def __init__(self, 
+                 grid = None, 
+                 voxel_data = None,
+                 surface_data = None,
+                 mesh_data = None,
+                 pvmesh = None,
+                 ):
         self.grid = grid
-        self.voxel_data = voxel_data
+        self.voxel_data   = voxel_data
+        self.surface_data = surface_data
+        self.mesh_data    = mesh_data
+        self.pvmesh       = pvmesh
         
     def construct_grid(self):
         raise NotImplementedError()
@@ -19,9 +30,12 @@ class VoxelModel:
         if self.grid is None:
             self.construct_grid()
         
-    def render_surface(self):
-         # REF: https://forum.freecadweb.org/viewtopic.php?t=19819#p233282
-         #      https://scikit-image.org/docs/dev/auto_examples/edges/plot_marching_cubes.html
+    def render_surface(self, cache = True):
+        #get from cache if already computed
+        if cache and self.surface_data is not None:
+            return self.surface_data
+        # REF: https://forum.freecadweb.org/viewtopic.php?t=19819#p233282
+        #      https://scikit-image.org/docs/dev/auto_examples/edges/plot_marching_cubes.html
         from skimage import measure
         #render the voxels first
         if self.voxel_data is None:
@@ -42,18 +56,52 @@ class VoxelModel:
         verts   += (cv_grid - cv_bounds)
         normals += (cv_grid - cv_bounds)
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
-        return (verts, faces, normals, values)
+        out_dict = OrderedDict()
+        out_dict['verts']   = verts
+        out_dict['faces']   = faces
+        out_dict['normals'] = normals
+        out_dict['values']  = values
+        if cache:
+            self.surface_data = out_dict
+        return out_dict
         
-    def render_mesh(self):
-        verts, faces, normals, values = self.render_surface()
+    def render_mesh(self, cache=True):
+        #get from cache if already computed
+        if cache and self.mesh_data is not None:
+            return self.mesh_data
+        surface_data = self.render_surface()
+        verts = surface_data['verts']
+        faces = surface_data['faces']
         import stl
         from stl import mesh
         data = np.zeros(faces.shape[0], dtype=mesh.Mesh.dtype)
-        rendered_mesh = mesh.Mesh(data, remove_empty_areas=False)
+        mesh_data = mesh.Mesh(data, remove_empty_areas=False)
         for i, f in enumerate(faces):
             for j in range(3):
-                rendered_mesh.vectors[i][j] = verts[f[j],:]
-        return rendered_mesh
+                mesh_data.vectors[i][j] = verts[f[j],:]
+        if cache:
+            self.mesh_data = mesh_data
+        return mesh_data
+
+    def render_pyvista_mesh(self, cache=True):
+        #REF https://stackoverflow.com/questions/6030098/how-to-display-a-3d-plot-of-a-3d-array-isosurface-in-matplotlib-mplot3d-or-simil/35472146
+        #get from cache if already computed
+        if cache and self.pvmesh is not None:
+            return self.pvmesh
+        import pyvista as pv
+        #render the voxels first
+        if self.voxel_data is None:
+            self.render_volume()
+        #get a numpy array of the grid points
+        X,Y,Z = self.grid.construct_mesh(make_empty_voxels=False)
+        m = self.grid.margin
+        V = self.voxel_data[m:-m,m:-m,m:-m]
+        grid = pv.StructuredGrid(X, Y, Z)
+        grid.point_data['vol'] = V.flatten()
+        DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
+        if cache:
+            self.pvmesh = pvmesh
+        return pvmesh
         
     def plot(self, style = None, axis = None, figure = None,**kwargs):
         if style is not None:
@@ -72,12 +120,12 @@ class VoxelModel:
         if style == 'vtk-mesh':
             import vtkplotlib as vpl
             #render mesh data
-            mesh = self.render_mesh()
+            mesh_data = self.render_mesh()
             #setup vtkplot figure
             if figure is None:
                 figure = vpl.figure()
             #plot the style
-            vpl.mesh_plot(mesh)
+            vpl.mesh_plot(mesh_data)
             #show if requested
             if kwargs.get('show',True):
                 vpl.show(block=kwargs.get('block',True)) #FIXME blocking is needed for interaction, limitation of vpl?
@@ -86,7 +134,9 @@ class VoxelModel:
         elif style in ['trisurf','poly3d']:
             import matplotlib.pyplot as plt
             #render surface data
-            verts, faces, normals, values = self.render_surface()
+            surface_data = self.render_surface()
+            verts = surface_data['verts']
+            faces = surface_data['faces']
             #setup matplotlib figure and axis
             if axis is None and figure is None:
                 figure = plt.figure()
@@ -123,80 +173,145 @@ class VoxelModel:
             plt.close(fig)
             
     def test_points(self, X, Y, Z):
-        """ test if points defined by mesh X, Y, Z are in bounds
+        """ test if points defined by mesh X, Y, Z are in the volume
         """
+        #LOGGER.debug(f"{self.__class__} -> {__class__}.test_points")
+        #LOGGER.debug(f"test_points: X.min()={X.min()},  X.max()={X.max()}")
+        #LOGGER.debug(f"test_points: Y.min()={Y.min()},  Y.max()={Y.max()}")
+        #LOGGER.debug(f"test_points: Z.min()={Z.min()},  Z.max()={Z.max()}")
         x0,x1 = self.grid.xlim; y0,y1 = self.grid.ylim; z0,z1 = self.grid.zlim
-        r_x, r_y, r_z = self.res_vector
+        rx, ry, rz = self.grid.res_vector
         #first test if the points are within the bounding box of the grid
-        in_bounds = (x0 < X) & (X < x1) & (y0 < Y) & (Y < y1) & (z0 < Z) & (Z < z1)
+        in_bounds = (x0 <= X) & (X <= x1) & (y0 <= Y) & (Y <= y1) & (z0 <= Z) & (Z <= z1)
         #transform into data indices, giving dummy values (-1) to points outside bounds
-        I = np.where(in_bounds, np.floor(r_x*(X-x0)/(x1-x0)).astype('int'),-1)
-        J = np.where(in_bounds, np.floor(r_y*(Y-y0)/(y1-y0)).astype('int'),-1)
-        K = np.where(in_bounds, np.floor(r_z*(Z-z0)/(z1-z0)).astype('int'),-1)
+        i_test = np.round(rx*(X-x0)/(x1-x0)).astype('int')
+        j_test = np.round(ry*(Y-y0)/(y1-y0)).astype('int')
+        k_test = np.round(rz*(Z-z0)/(z1-z0)).astype('int')
+        #LOGGER.debug(f"test_points: i_test.min()={i_test.min()},  i_test.max()={i_test.max()}")
+        #LOGGER.debug(f"test_points: j_test.min()={j_test.min()},  j_test.max()={j_test.max()}")
+        #LOGGER.debug(f"test_points: k_test.min()={k_test.min()},  k_test.max()={k_test.max()}")
+        #filter based on bounds and index cheking
+        I = np.where(in_bounds & (0 <= i_test) & (i_test < rx),i_test,-1)
+        J = np.where(in_bounds & (0 <= j_test) & (j_test < ry),j_test,-1)
+        K = np.where(in_bounds & (0 <= k_test) & (k_test < rz),k_test,-1)
+        #LOGGER.debug(f"test_points: I.min()={I.min()},  I.max()={I.max()}")
+        #LOGGER.debug(f"test_points: J.min()={J.min()},  J.max()={J.max()}")
+        #LOGGER.debug(f"test_points: K.min()={K.min()},  K.max()={K.max()}")
         #use indices to interpolate the voxel data between the margins
         if self.voxel_data is None:  #render the voxels first
             self.render_volume()
         m = self.grid.margin
         V = self.voxel_data[m:-m,m:-m,m:-m]
-        in_volume = np.where(in_bounds,V[I,J,K],False)
+        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
+        in_volume = np.where((I >=0) & (J >=0) & (K >=0),V[I,J,K],False)
         return in_volume
 
     def rotate_z(self, degrees):
         #construct the rotation matrix and its inverse
         theta = np.radians(degrees)
         c, s = np.cos(theta), np.sin(theta)
-        R = np.array(((0,c,-s),(0,s,c),(0,0,1.0)))
+        R    = np.array(((c,-s,0),( s,c,0),(0,0,1.0)))
+        Rinv = np.array(((c, s,0),(-s,c,0),(0,0,1.0))) #subs -theta in sin
+        m = self.apply_transformation(R,Rinv)
+        LOGGER.debug(f"rotate_z: m.shape: {m.voxel_data.shape}")
+        LOGGER.debug(f"\tm.sum: {m.voxel_data.sum()}")
+        LOGGER.debug(f"\tm.grid: {m.grid!r}")
+        return m
+
+    def apply_transformation(self, M, Minv):
         #rotate the bounding box corners
-        x0,x1 = self.grid.xlim; y0,y1 = self.grid.ylim; z0,z1 = self.grid.zlim
-        C = np.array((
-            (x0,y0,z0),
-            (x1,y0,z0),
-            (x0,y1,z0),
-            (x1,y1,z0),
-            (x0,y0,z1),
-            (x1,y0,z1),
-            (x0,y1,z1),
-            (x1,y1,z1)
-        ))
-        Cr = np.dot(C,R.T) #apply rotation matrix
-        
-        DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
-        #create a new rotated grid with maximal resolution
-        r_x, r_y, r_z = self.res_vector
-        r_max = max(r_x, r_y, r_z)
-        xlim,ylim,zlim = (v0r[0],v1r[0]),(v0r[1],v1r[1]),(v0r[2],v1r[2])
-        rot_grid = VoxelGrid(xlim,ylim,zlim,res=r_max)
-        Xr,Yr,Zr = rot_grid.construct_mesh(make_empty_voxels=False)
-        #invert the rotation to map back to the orginal data space
-        c_inv, s_inv = np.cos(-theta), np.sin(-theta)
-        X =  c_inv*Xr + s_inv*Yr  # "clockwise"
-        Y = -s_inv*Xr + c_inv*Yr
-        Z = Zr
+        C  = self.grid.compute_box_corner_vectors() #shape (8,3) (vectors, axes)
+        Ct = np.dot(C,M.T) #apply transformation matrix
+        #compute the limits of the new bounding box
+        x0,x1 = xlim = (Ct[:,0].min(),Ct[:,0].max())
+        y0,y1 = ylim = (Ct[:,1].min(),Ct[:,1].max())
+        z0,z1 = zlim = (Ct[:,2].min(),Ct[:,2].max())
+        #create a new grid preserving voxel size
+        rx, ry, rz = self.grid.res_vector
+        sv = self.grid.compute_size_vector()
+        res = (np.round(rx*(x1-x0)/sv[0]),
+               np.round(ry*(y1-y0)/sv[1]),
+               np.round(rz*(z1-z0)/sv[2]))
+        #res = max(rx,ry,rz)
+        new_grid = VoxelGrid(xlim,ylim,zlim,res=res)
+        Xt,Yt,Zt,Vt,m = new_grid.construct_mesh()
+        #invert the rotation to map the mesh points back to the orginal data space
+        X = Minv[0,0]*Xt + Minv[0,1]*Yt + Minv[0,2]*Zt
+        Y = Minv[1,0]*Xt + Minv[1,1]*Yt + Minv[1,2]*Zt
+        Z = Minv[2,0]*Xt + Minv[2,1]*Yt + Minv[2,2]*Zt
         #test if the new mesh points are contained in the volume
-        rot_voxel_data = self.test_points(X,Y,Z)
-        DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
-        return VoxelModel(grid=rot_grid,voxel_data=rot_voxel_data)
+        #and fill within the margins
+        Vt[m:-m,m:-m,m:-m] = self.test_points(X,Y,Z)
+        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
+        return VoxelModel(grid=new_grid,voxel_data=Vt)
         
-
-
-            
     def __or__(self, other): #union
-        self.render_volume()  #FIXME this should only be done in necessary
-        other.render_volume() #FIXME this should only be done in necessary
+        if self.voxel_data is None:
+            self.render_volume()
+        if other.voxel_data is None:
+            other.render_volume()
         #compute bounding voxel grid
         bounding_grid = self.grid | other.grid
-        X,Y,Z = bounding_grid.construct_mesh(make_empty_voxels=False)
+        X,Y,Z,V,m = bounding_grid.construct_mesh()
         #test if the new mesh points are contained in either of the respective volumes 
-        voxel_data = self.test_points(X,Y,Z) | other.test_points(X,Y,Z)
-        return VoxelModel(grid=bounding_grid,voxel_data=voxel_data)
-        
-        
+        #and fill within the margins
+        V[m:-m,m:-m,m:-m] = self.test_points(X,Y,Z) | other.test_points(X,Y,Z)
+        return VoxelModel(grid=bounding_grid,voxel_data=V)
+         
     def __and__(self, other): #intersection
-        self.render_volume()   #FIXME this should only be done in necessary
-        other.render_volume()  #FIXME this should only be done in necessary
+        if self.voxel_data is None:
+            self.render_volume()
+        if other.voxel_data is None:
+            other.render_volume()
         #compute bounding voxel grid
         bounding_grid = self.grid & other.grid
-        X,Y,Z = bounding_grid.construct_mesh(make_empty_voxels=False)
+        X,Y,Z,V,m = bounding_grid.construct_mesh()
         #test if the new mesh points are contained in both of the respective volumes 
-        voxel_data = self.test_points(X,Y,Z) & other.test_points(X,Y,Z)
-        return VoxelModel(grid=bounding_grid,voxel_data=voxel_data)
+        V[m:-m,m:-m,m:-m] = self.test_points(X,Y,Z) & other.test_points(X,Y,Z)
+        return VoxelModel(grid=bounding_grid,voxel_data=V)
+
+def union_all(models):
+    u = models[0]
+    for i,m in enumerate(models[1:]):
+        LOGGER.debug(f"union_all #{i}: u.grid.sv: {u.grid.compute_size_vector()}")
+        u |= m
+        
+    return u
+
+
+
+def voxel_fuzz(V, nseeds=1000, iters=5):
+    #get list of all solid voxels
+    I = np.argwhere(V == True)
+    #choose solid voxels at random
+    indices = np.random.choice(I.shape[0],size=nseeds)
+    seed_locs = I[indices,:]
+    #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
+    for i in range(iters):
+        next_seed_locs = []
+        for seed_loc in seed_locs:
+            try:
+                x,y,z = seed_loc
+                #look at nearest neighbors and find the normal direction
+                Vnn = 1*V[x-1:x+2,y-1:y+2,z-1:z+2] #convert to 1 and 0
+                dx = Vnn[2,1,1] - Vnn[0,1,1]
+                dy = Vnn[1,2,1] - Vnn[1,0,1]
+                dz = Vnn[1,1,2] - Vnn[1,1,0]
+                dxy = Vnn[2,2,1] - Vnn[0,0,1]
+                dxz = Vnn[2,1,2] - Vnn[0,1,0]
+                dyz = Vnn[1,2,2] - Vnn[1,0,0]
+                dxyz = Vnn[2,2,2] - Vnn[0,0,0]
+                dn = -np.array((dx+dxy+dxz+dxyz,dy+dxy+dyz+dxyz,dz+dxz+dyz+dxyz))
+                #grow the volume in the normal direction
+                x += dn[0]
+                y += dn[1]
+                z += dn[2]
+                V[x,y,z] = True
+                next_seed_locs.append((x,y,z))
+            except IndexError:
+                pass #ignore boundry issues
+        seed_locs = next_seed_locs
+    #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
+    return V
+
+
