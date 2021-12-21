@@ -1,4 +1,5 @@
 from typing import OrderedDict
+from matplotlib.pyplot import margins
 import numpy as np
 
 import voxelcad.environment as ENV
@@ -190,7 +191,7 @@ class VoxelModel:
         #LOGGER.debug(f"test_points: i_test.min()={i_test.min()},  i_test.max()={i_test.max()}")
         #LOGGER.debug(f"test_points: j_test.min()={j_test.min()},  j_test.max()={j_test.max()}")
         #LOGGER.debug(f"test_points: k_test.min()={k_test.min()},  k_test.max()={k_test.max()}")
-        #filter based on bounds and index cheking
+        #filter based on bounds and index checking
         I = np.where(in_bounds & (0 <= i_test) & (i_test < rx),i_test,-1)
         J = np.where(in_bounds & (0 <= j_test) & (j_test < ry),j_test,-1)
         K = np.where(in_bounds & (0 <= k_test) & (k_test < rz),k_test,-1)
@@ -202,9 +203,22 @@ class VoxelModel:
             self.render_volume()
         m = self.grid.margin
         V = self.voxel_data[m:-m,m:-m,m:-m]
-        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         in_volume = np.where((I >=0) & (J >=0) & (K >=0),V[I,J,K],False)
         return in_volume
+
+    def translate(self, v):
+        if self.voxel_data is None:  #render the voxels first
+            self.render_volume()
+        new_grid = VoxelGrid(xlim=self.grid.xlim + v[0],
+                             ylim=self.grid.ylim + v[1],
+                             zlim=self.grid.zlim + v[2],
+                             res=self.grid.res_vector,
+                             margin=self.grid.margin,
+                             )
+        vm = VoxelModel(grid=new_grid,voxel_data=self.voxel_data)
+        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
+        return vm
+
 
     def rotate_z(self, degrees):
         #construct the rotation matrix and its inverse
@@ -270,6 +284,17 @@ class VoxelModel:
         V[m:-m,m:-m,m:-m] = self.test_points(X,Y,Z) & other.test_points(X,Y,Z)
         return VoxelModel(grid=bounding_grid,voxel_data=V)
 
+    def __sub__(self, other): #difference
+        if self.voxel_data is None:
+            self.render_volume()
+        if other.voxel_data is None:
+            other.render_volume()
+        #compute bounding voxel grid
+        X,Y,Z,V,m = self.grid.construct_mesh()
+        #test if the new mesh points are contained in the first but not the second volume
+        V[m:-m,m:-m,m:-m] = self.test_points(X,Y,Z) & ~other.test_points(X,Y,Z)
+        return VoxelModel(grid=self.grid,voxel_data=V)
+
 def union_all(models):
     u = models[0]
     for i,m in enumerate(models[1:]):
@@ -277,41 +302,3 @@ def union_all(models):
         u |= m
         
     return u
-
-
-
-def voxel_fuzz(V, nseeds=1000, iters=5):
-    #get list of all solid voxels
-    I = np.argwhere(V == True)
-    #choose solid voxels at random
-    indices = np.random.choice(I.shape[0],size=nseeds)
-    seed_locs = I[indices,:]
-    #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
-    for i in range(iters):
-        next_seed_locs = []
-        for seed_loc in seed_locs:
-            try:
-                x,y,z = seed_loc
-                #look at nearest neighbors and find the normal direction
-                Vnn = 1*V[x-1:x+2,y-1:y+2,z-1:z+2] #convert to 1 and 0
-                dx = Vnn[2,1,1] - Vnn[0,1,1]
-                dy = Vnn[1,2,1] - Vnn[1,0,1]
-                dz = Vnn[1,1,2] - Vnn[1,1,0]
-                dxy = Vnn[2,2,1] - Vnn[0,0,1]
-                dxz = Vnn[2,1,2] - Vnn[0,1,0]
-                dyz = Vnn[1,2,2] - Vnn[1,0,0]
-                dxyz = Vnn[2,2,2] - Vnn[0,0,0]
-                dn = -np.array((dx+dxy+dxz+dxyz,dy+dxy+dyz+dxyz,dz+dxz+dyz+dxyz))
-                #grow the volume in the normal direction
-                x += dn[0]
-                y += dn[1]
-                z += dn[2]
-                V[x,y,z] = True
-                next_seed_locs.append((x,y,z))
-            except IndexError:
-                pass #ignore boundry issues
-        seed_locs = next_seed_locs
-    #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
-    return V
-
-
