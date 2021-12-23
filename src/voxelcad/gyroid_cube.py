@@ -9,7 +9,7 @@ class GyroidCube(Cube):
     def __init__(self, size, 
                  lattice_param = 1.0, 
                  structure_param=0.0, 
-                 thresh1=0.0, 
+                 thresh1=1.0, 
                  thresh2=None, 
                  **kwargs):
         super().__init__(size, **kwargs)
@@ -32,7 +32,7 @@ class GyroidCube(Cube):
         if self.thresh1 is not None and self.thresh2 is not None:
             V[m:-m,m:-m,m:-m] =  ((F > self.thresh1) & (F < self.thresh2))
         elif self.thresh1 is not None:
-            V[m:-m,m:-m,m:-m] = (F > 0) | (F < self.thresh1)
+            V[m:-m,m:-m,m:-m] = (F > 0) & (F < self.thresh1)
         else:
             raise ValueError("Either or both thresh1, thresh2 should not be None")
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
