@@ -122,7 +122,7 @@ class VoxelModel:
         m = self.grid.margin
         V = self.voxel_data[m:-m,m:-m,m:-m]
         rv  = self.grid.res_vector
-        vsv = self.grid.compute_voxel_size_vector()
+        vsv = self.grid.voxel_size_vector
         pv_grid = pv.UniformGrid()
         # Set the grid dimensions: shape + 1 because we want to inject our values on
         #   the CELL data
@@ -130,9 +130,9 @@ class VoxelModel:
         # Edit the spatial reference
         #grid.origin = (100, 33, 55.6)  # The bottom left corner of the data set
         pv_grid.spacing = vsv  # These are the cell sizes along each axis
-        pv_grid.cell_data['vol'] = 255.0*V.flatten()
+        pv_grid.cell_data['vol'] = 255.0*V.flatten(order="F") #NOTE column-major (Fortran) order must be specified!
         pv_vol = pv_grid.threshold(128) #convert to unstructured grid of just the solid areas
-        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
+        DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         if cache:
             self.pv_vol = pv_vol
         return self.pv_vol
