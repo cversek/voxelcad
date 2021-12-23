@@ -16,13 +16,15 @@ class VoxelModel:
                  voxel_data = None,
                  surface_data = None,
                  mesh_data = None,
-                 pvmesh = None,
+                 pv_vol = None,
+                 pv_surf = None,
                  ):
         self.grid = grid
         self.voxel_data   = voxel_data
         self.surface_data = surface_data
         self.mesh_data    = mesh_data
-        self.pvmesh       = pvmesh
+        self.pv_vol       = pv_vol
+        self.pv_surf      = pv_surf
         
     def construct_grid(self):
         raise NotImplementedError()
@@ -31,13 +33,13 @@ class VoxelModel:
         if self.grid is None:
             self.construct_grid()
         
-    def render_surface(self, cache = True):
+    def render_surface(self, cache = True, use_smoothing = False, lib=None):
         #get from cache if already computed
         if cache and self.surface_data is not None:
             return self.surface_data
         # REF: https://forum.freecadweb.org/viewtopic.php?t=19819#p233282
         #      https://scikit-image.org/docs/dev/auto_examples/edges/plot_marching_cubes.html
-        from skimage import measure
+        # REF: https://github.com/pmneila/PyMCubes
         #render the voxels first
         if self.voxel_data is None:
             self.render_volume()
@@ -45,7 +47,26 @@ class VoxelModel:
         sv = self.grid.compute_size_vector()
         rv = self.grid.res_vector
         spacing = tuple(sv/rv)
-        verts, faces, normals, values = measure.marching_cubes(self.voxel_data, 0, spacing=spacing) # , normals, values <<need to add these after faces if newer version of skimage
+        V = self.voxel_data
+        if use_smoothing and (lib is None or lib=="mcubes"):
+            import mcubes
+            V = mcubes.smooth(V)
+            lib = "mcubes"
+        elif use_smoothing:
+            raise ValueError("can only use smoothing with lib='mcubes'")
+        if lib is None:
+            lib = "skimage" #default to faster implementation
+        verts,faces,normals,values = (None,None,None,None)
+        if lib == "mcubes":
+            import mcubes
+             # Extract the 0-levelset (the 0-levelset of the output of mcubes.smooth is the
+            # smoothed version of the 0.5-levelset of the binary array).
+            verts, faces = mcubes.marching_cubes(V, 0)
+        elif lib == "skimage":
+            from skimage.measure import marching_cubes
+            verts, faces, normals, values = marching_cubes(self.voxel_data,level=0, spacing=spacing) # , normals, values <<need to add these after faces if newer version of skimage
+        else:
+            raise ValueError(f"lib={lib!r} is not a valid choice, try 'skimage' or 'mcubes")
         #compute new bounds
         x0,x1 = (verts[:,0].min(),verts[:,0].max())
         y0,y1 = (verts[:,1].min(),verts[:,1].max())
@@ -55,7 +76,8 @@ class VoxelModel:
         cv_grid   = self.grid.compute_center_vector()
         #move points to the grid space
         verts   += (cv_grid - cv_bounds)
-        normals += (cv_grid - cv_bounds)
+        if normals is not None:
+            normals += (cv_grid - cv_bounds)
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         out_dict = OrderedDict()
         out_dict['verts']   = verts
@@ -84,11 +106,13 @@ class VoxelModel:
             self.mesh_data = mesh_data
         return mesh_data
 
-    def render_pyvista_mesh(self, cache=True):
+    def render_pyvista_volume_mesh(self, cache=True):
         #REF https://stackoverflow.com/questions/6030098/how-to-display-a-3d-plot-of-a-3d-array-isosurface-in-matplotlib-mplot3d-or-simil/35472146
+        #REF https://docs.pyvista.org/examples/00-load/create-uniform-grid.html
+
         #get from cache if already computed
-        if cache and self.pvmesh is not None:
-            return self.pvmesh
+        if cache and self.pv_vol is not None:
+            return self.pv_vol
         import pyvista as pv
         #render the voxels first
         if self.voxel_data is None:
@@ -97,12 +121,58 @@ class VoxelModel:
         X,Y,Z = self.grid.construct_mesh(make_empty_voxels=False)
         m = self.grid.margin
         V = self.voxel_data[m:-m,m:-m,m:-m]
-        grid = pv.StructuredGrid(X, Y, Z)
-        grid.point_data['vol'] = V.flatten()
-        DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
+        rv  = self.grid.res_vector
+        vsv = self.grid.compute_voxel_size_vector()
+        pv_grid = pv.UniformGrid()
+        # Set the grid dimensions: shape + 1 because we want to inject our values on
+        #   the CELL data
+        pv_grid.dimensions = rv + 1
+        # Edit the spatial reference
+        #grid.origin = (100, 33, 55.6)  # The bottom left corner of the data set
+        pv_grid.spacing = vsv  # These are the cell sizes along each axis
+        pv_grid.cell_data['vol'] = 255.0*V.flatten()
+        pv_vol = pv_grid.threshold(128) #convert to unstructured grid of just the solid areas
+        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         if cache:
-            self.pvmesh = pvmesh
-        return pvmesh
+            self.pv_vol = pv_vol
+        return self.pv_vol
+
+    def render_pyvista_surface_mesh(self, 
+                                    cache=True,
+                                    surf_render_lib='skimage',
+                                    smooth_iters = 0,
+                                    downscale_times = 0,
+                                    only_largest_component = False,
+                                    ):
+        #REF https://stackoverflow.com/questions/6030098/how-to-display-a-3d-plot-of-a-3d-array-isosurface-in-matplotlib-mplot3d-or-simil/35472146
+        #REF https://docs.pyvista.org/examples/00-load/create-uniform-grid.html
+
+        #get from cache if already computed
+        if cache and self.pv_surf is not None:
+            return self.pv_surf
+        import pyvista as pv
+        #render the voxels first
+        if self.voxel_data is None:
+            self.render_volume()
+        surf = self.render_surface(lib=surf_render_lib)
+        verts = surf['verts']
+        faces = surf['faces']
+        #format triangular faces as [3,p1,p2,p4] for PolyData
+        faces = np.vstack((3*np.ones(faces.shape[0],dtype='int32'),faces.T)).T
+        pv_surf = pv.PolyData(verts,faces=faces)
+        #do filtering steps
+        if smooth_iters > 0:
+            pv_surf = pv_surf.smooth(n_iter=smooth_iters,progress_bar=True)
+        if downscale_times > 0:
+            #we use pyvista to clean up the mesh
+            from voxelcad.utils.pyvista_tools import downscale_trimesh
+            #cut the number of triangles down by 2**3 times
+            pv_surf = downscale_trimesh(pv_surf,repeat=downscale_times,decimation_factor=0.5)
+        if only_largest_component:
+            pv_surf = pv_surf.extract_largest()
+        if cache:
+            self.pv_surf = pv_surf
+        return self.pv_surf
         
     def plot(self, style = None, axis = None, figure = None,**kwargs):
         if style is not None:
@@ -159,15 +229,20 @@ class VoxelModel:
                 plt.show()
             return figure
         
-    def export(self, filename):
+    def export(self, filename, pvfilter = False):
         if filename.endswith(".nii"): #NIfTi
             import nibabel as nib
             xform = np.eye(4) * 2
             img = nib.nifti1.Nifti1Image(1.0*self.voxel_data, xform)
             nib.save(img,filename)
         elif filename.endswith(".stl"): #STL for 3d Printing
-            rendered_mesh = self.render_mesh()
-            rendered_mesh.save(filename)
+            if not pvfilter:
+                rendered_mesh = self.render_mesh()
+                rendered_mesh.save(filename)
+            else:
+                pv_surf = self.render_pyvista_surface_mesh(filter=pvfilter)
+               
+
         elif filename.endswith(".png"): #using matplotlib 
             fig = self.plot(show=False)
             fig.savefig(filename)
@@ -176,28 +251,28 @@ class VoxelModel:
     def test_points(self, X, Y, Z):
         """ test if points defined by mesh X, Y, Z are in the volume
         """
-        #LOGGER.debug(f"{self.__class__} -> {__class__}.test_points")
-        #LOGGER.debug(f"test_points: X.min()={X.min()},  X.max()={X.max()}")
-        #LOGGER.debug(f"test_points: Y.min()={Y.min()},  Y.max()={Y.max()}")
-        #LOGGER.debug(f"test_points: Z.min()={Z.min()},  Z.max()={Z.max()}")
+        LOGGER.debug(f"{self.__class__} -> {__class__}.test_points")
+        LOGGER.debug(f"test_points: X.min()={X.min()},  X.max()={X.max()}")
+        LOGGER.debug(f"test_points: Y.min()={Y.min()},  Y.max()={Y.max()}")
+        LOGGER.debug(f"test_points: Z.min()={Z.min()},  Z.max()={Z.max()}")
         x0,x1 = self.grid.xlim; y0,y1 = self.grid.ylim; z0,z1 = self.grid.zlim
         rx, ry, rz = self.grid.res_vector
         #first test if the points are within the bounding box of the grid
-        in_bounds = (x0 <= X) & (X <= x1) & (y0 <= Y) & (Y <= y1) & (z0 <= Z) & (Z <= z1)
+        in_bounds = (x0 < X) & (X < x1) & (y0 < Y) & (Y < y1) & (z0 < Z) & (Z < z1)
         #transform into data indices, giving dummy values (-1) to points outside bounds
         i_test = np.round(rx*(X-x0)/(x1-x0)).astype('int')
         j_test = np.round(ry*(Y-y0)/(y1-y0)).astype('int')
         k_test = np.round(rz*(Z-z0)/(z1-z0)).astype('int')
-        #LOGGER.debug(f"test_points: i_test.min()={i_test.min()},  i_test.max()={i_test.max()}")
-        #LOGGER.debug(f"test_points: j_test.min()={j_test.min()},  j_test.max()={j_test.max()}")
-        #LOGGER.debug(f"test_points: k_test.min()={k_test.min()},  k_test.max()={k_test.max()}")
+        LOGGER.debug(f"test_points: i_test.min()={i_test.min()},  i_test.max()={i_test.max()}")
+        LOGGER.debug(f"test_points: j_test.min()={j_test.min()},  j_test.max()={j_test.max()}")
+        LOGGER.debug(f"test_points: k_test.min()={k_test.min()},  k_test.max()={k_test.max()}")
         #filter based on bounds and index checking
         I = np.where(in_bounds & (0 <= i_test) & (i_test < rx),i_test,-1)
         J = np.where(in_bounds & (0 <= j_test) & (j_test < ry),j_test,-1)
         K = np.where(in_bounds & (0 <= k_test) & (k_test < rz),k_test,-1)
-        #LOGGER.debug(f"test_points: I.min()={I.min()},  I.max()={I.max()}")
-        #LOGGER.debug(f"test_points: J.min()={J.min()},  J.max()={J.max()}")
-        #LOGGER.debug(f"test_points: K.min()={K.min()},  K.max()={K.max()}")
+        LOGGER.debug(f"test_points: I.min()={I.min()},  I.max()={I.max()}")
+        LOGGER.debug(f"test_points: J.min()={J.min()},  J.max()={J.max()}")
+        LOGGER.debug(f"test_points: K.min()={K.min()},  K.max()={K.max()}")
         #use indices to interpolate the voxel data between the margins
         if self.voxel_data is None:  #render the voxels first
             self.render_volume()
