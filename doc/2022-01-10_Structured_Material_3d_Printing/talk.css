@@ -56,23 +56,3 @@ div.prompt_container {
 /* ---------- Custom HTML
  */
 
-
- /* Three image containers (use 25% for four, and 50% for two, etc) */
-
-figure {
-  display: inline-block;
-  text-align: center;
-  font-style: italic;
-  font-size: smaller;
-  border: 1px dotted gray;
-  margin: 5px; /* adjust as needed */
-}
-
-figure img {
-  vertical-align: top;
-}
-
-figure figcaption {
-  border: 1px dotted blue;
-}
-
