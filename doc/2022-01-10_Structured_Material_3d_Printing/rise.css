@@ -2,3 +2,8 @@
 .reveal pre code {
     max-height: 40000px;
 }
+
+/*link that displays href target after text*/
+a.showlink::after {
+        content:  attr(href);
+}
