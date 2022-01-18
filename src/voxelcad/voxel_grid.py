@@ -1,16 +1,35 @@
 import numpy as np
+import pyvista as pv
 
 from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED
 
+import voxelcad.environment as ENV
+
+#subclass the pyvista UniformGrid class to provide convenient extensions
+class UniformGrid(pv.UniformGrid):
+    #overload plots with some helpful defaults
+    def plot(volume=True, opacity="sigmoid", cmap="coolwarm",*args,**kwargs):
+        kwargs['volume']  = volume
+        kwargs['opacity'] = opacity
+        kwargs['cmap']    = cmap
+        super().plot(*args,**kwargs)
+        
 
 class VoxelGrid:
-    def __init__(self, xlim,ylim,zlim,res,margin=2):
+    def __init__(self,xlim,ylim,zlim,voxel_size,margin=2):
         assert(xlim[0] < xlim[1]);assert(ylim[0] < ylim[1]);assert(zlim[0] < zlim[1])
         self.xlim = np.array(xlim)
         self.ylim = np.array(ylim)
         self.zlim = np.array(zlim)
         assert(self.xlim.shape == self.ylim.shape == self.zlim.shape == (2,))
-        self.res_vector  = (np.array(res)*np.ones(3)).astype('uint')
+        #format the voxel size
+        if voxel_size is None:
+            voxel_size = ENV.voxel_size
+        self.voxel_size_vector = vsv  = (np.array(voxel_size)*np.ones(3)).astype('float32')
+        #derive the resolution vector to best approximate the voxel size
+        sv = self.compute_size_vector()
+        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals(),exit=False)
+        self.res_vector  = np.ceil(sv/vsv).astype('uint')
         #NOTE must have a 1 voxel margin at edges for surface algos to work properly
         margin = int(margin)
         assert(margin >= 1)
@@ -19,11 +38,6 @@ class VoxelGrid:
     def compute_size_vector(self):
         x0,x1 = self.xlim; y0,y1 = self.ylim; z0,z1 = self.zlim
         return np.array((x1-x0,y1-y0,z1-z0))
-
-    def compute_voxel_size_vector(self):
-        sv = self.compute_size_vector()
-        vsv = sv/self.res_vector
-        return vsv
         
     def compute_center_vector(self):
         x0,x1 = self.xlim; y0,y1 = self.ylim; z0,z1 = self.zlim
@@ -82,14 +96,12 @@ class VoxelGrid:
     def _construct_new_bounding_grid(cls,grid1,grid2,xlim,ylim,zlim):
         #compute new size vector
         sv = np.array((xlim[1]-xlim[0],ylim[1]-ylim[0],zlim[1]-zlim[0]))
-        #compute new resolution vectors
-        rv1 = sv/grid1.compute_voxel_size_vector()
-        rv2 = sv/grid2.compute_voxel_size_vector()
-        #maximize resolution preserve voxel size of the finest elements
-        rx   = max(rv1[0],rv2[0])
-        ry   = max(rv1[1],rv2[1])
-        rz   = max(rv1[2],rv2[2])
-        return cls(xlim,ylim,zlim,(rx,ry,rz))
+        #preserve voxel size of the finest elements
+        vsv1 = grid1.voxel_size_vector
+        vsv2 = grid2.voxel_size_vector
+        new_vsv = np.vstack((vsv1,vsv2)).min(axis=0)
+        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals(),exit=False)
+        return cls(xlim,ylim,zlim,new_vsv)
 
     def __repr__(self):
         s = self
