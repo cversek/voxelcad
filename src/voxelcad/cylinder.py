@@ -1,7 +1,5 @@
 import numpy as np
 
-import voxelcad.environment as ENV
-
 from voxelcad.voxel_model import VoxelModel
 from voxelcad.voxel_grid  import VoxelGrid
 
@@ -54,7 +52,7 @@ class Cylinder(VoxelModel):
         Pz = Zc/h + 0.5  # 0 at -h/2, 1 at h/2
         #interpolate radii along Z
         R = r1*(1.0-Pz) + r2*Pz
-        V[m:-m,m:-m,m:-m] = (Xc**2 + Yc**2 <= R**2) & ((0 <= Pz) & (Pz <= 1.0))
+        V[m:-m,m:-m,m:-m] = (Xc**2 + Yc**2 <= R**2) & ((0.0 <= Pz) & (Pz <= 1.0))
         self.voxel_data = V
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         return self.voxel_data

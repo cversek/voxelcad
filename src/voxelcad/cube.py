@@ -8,26 +8,23 @@ from voxelcad.voxel_grid  import VoxelGrid
 from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED
 
 class Cube(VoxelModel):
-    def __init__(self, size, res=None, center=False, **kwargs):
+    def __init__(self, size, voxel_size=None, center=False, **kwargs):
         super().__init__(**kwargs)
         self.size = np.array(size)*np.ones(3)
         self.center = center
         #set up grid dimensions
-        if res is None:
-            res = ENV.res
-        res_vector  = (np.array(res)*np.ones(3)).astype('uint')
         if self.center:
             sx,sy,sz = self.size/2
             self.grid = VoxelGrid(xlim=(-sx,sx),
                                   ylim=(-sy,sy),
                                   zlim=(-sz,sz),
-                                  res=res_vector)
+                                  voxel_size=voxel_size)
         else:
             sx,sy,sz = self.size
             self.grid = VoxelGrid(xlim=(0,sx),
                                   ylim=(0,sy),
                                   zlim=(0,sz),
-                                  res=res_vector)
+                                  voxel_size=voxel_size)
         
     def render_volume(self):
         super().render_volume() # will construct_grid if it is None
