@@ -1,7 +1,7 @@
 import numpy as np
 import pyvista as pv
 
-from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED
+from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED, LOGGER
 
 import voxelcad.environment as ENV
 
@@ -60,9 +60,14 @@ class VoxelGrid:
         return C
         
     def construct_mesh(self, make_empty_voxels=True, voxel_dtype = 'bool'):   
-        rx,ry,rz = self.res_vector
+        rx,ry,rz    = self.res_vector
+        vsx,vsy,vsz = self.voxel_size_vector 
         x0,x1 = self.xlim; y0,y1 = self.ylim; z0,z1 = self.zlim
-        X,Y,Z =  np.mgrid[x0:x1:rx*1j, y0:y1:ry*1j, z0:z1:rz*1j]
+        #transform to center cell coords
+        xcc0=x0+vsx/2.0; xcc1=x1-vsx/2.0
+        ycc0=y0+vsy/2.0; ycc1=y1-vsy/2.0
+        zcc0=z0+vsz/2.0; zcc1=z1-vsz/2.0
+        X,Y,Z =  np.mgrid[xcc0:xcc1:rx*1j, ycc0:ycc1:ry*1j, zcc0:zcc1:rz*1j]
         if make_empty_voxels:
             #build an empty voxel array with a margin
             m = self.margin
@@ -79,6 +84,7 @@ class VoxelGrid:
                 max(self.ylim[1],other.ylim[1]))
         zlim = (min(self.zlim[0],other.zlim[0]),
                 max(self.zlim[1],other.zlim[1]))
+        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals(),exit=False)
         return VoxelGrid._construct_new_bounding_grid(self,other,xlim,ylim,zlim)
         
         
@@ -105,4 +111,4 @@ class VoxelGrid:
 
     def __repr__(self):
         s = self
-        return f"VoxelGrid(xlim={s.xlim},ylim={s.ylim},zlim={s.zlim},res={s.res_vector})"
+        return f"VoxelGrid(xlim={s.xlim},ylim={s.ylim},zlim={s.zlim},voxel_size={s.voxel_size_vector})"

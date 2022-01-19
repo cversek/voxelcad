@@ -5,11 +5,12 @@ import pyvista as pv
 
 import voxelcad.environment as ENV
 
-from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED
+from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED, LOGGER
+LOGGER.setLevel("DEBUG")
+
 from voxelcad.voxel_grid import VoxelGrid, UniformGrid
 
-import logging
-LOGGER = logging.getLogger(__name__)
+
 
 class VoxelModel:
     def __init__(self, 
@@ -117,11 +118,11 @@ class VoxelModel:
         x0,x1 = self.grid.xlim; y0,y1 = self.grid.ylim; z0,z1 = self.grid.zlim
         rx, ry, rz = self.grid.res_vector
         #first test if the points are within the bounding box of the grid
-        in_bounds = (x0 < X) & (X < x1) & (y0 < Y) & (Y < y1) & (z0 < Z) & (Z < z1)
+        in_bounds = (x0 <= X) & (X <= x1) & (y0 <= Y) & (Y <= y1) & (z0 <= Z) & (Z <= z1)
         #transform into data indices, giving dummy values (-1) to points outside bounds
-        i_test = np.round(rx*(X-x0)/(x1-x0)).astype('int')
-        j_test = np.round(ry*(Y-y0)/(y1-y0)).astype('int')
-        k_test = np.round(rz*(Z-z0)/(z1-z0)).astype('int')
+        i_test = np.floor(rx*(X-x0)/(x1-x0)).astype('int')
+        j_test = np.floor(ry*(Y-y0)/(y1-y0)).astype('int')
+        k_test = np.floor(rz*(Z-z0)/(z1-z0)).astype('int')
         LOGGER.debug(f"test_points: i_test.min()={i_test.min()},  i_test.max()={i_test.max()}")
         LOGGER.debug(f"test_points: j_test.min()={j_test.min()},  j_test.max()={j_test.max()}")
         LOGGER.debug(f"test_points: k_test.min()={k_test.min()},  k_test.max()={k_test.max()}")
@@ -138,6 +139,7 @@ class VoxelModel:
         m = self.grid.margin
         V = self.voxel_data[m:-m,m:-m,m:-m]
         in_volume = np.where((I >=0) & (J >=0) & (K >=0),V[I,J,K],False)
+        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         return in_volume
 
     def translate(self, v):
@@ -203,7 +205,10 @@ class VoxelModel:
         X,Y,Z,V,m = bounding_grid.construct_mesh()
         #test if the new mesh points are contained in either of the respective volumes 
         #and fill within the margins
-        V[m:-m,m:-m,m:-m] = self.test_points(X,Y,Z) | other.test_points(X,Y,Z)
+        V1 = self.test_points(X,Y,Z)
+        V2 = other.test_points(X,Y,Z)
+        V[m:-m,m:-m,m:-m] = V1 | V2
+        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         return VoxelModel(grid=bounding_grid,voxel_data=V)
          
     def __and__(self, other): #intersection
@@ -231,8 +236,10 @@ class VoxelModel:
 
 def union_all(models):
     u = models[0]
+    print(f"union_all #{0}: u.grid.sv: {u.grid.compute_size_vector()}")
     for i,m in enumerate(models[1:]):
-        LOGGER.debug(f"union_all #{i}: u.grid.sv: {u.grid.compute_size_vector()}")
+        #LOGGER.debug(f"union_all #{i}: u.grid.sv: {u.grid.compute_size_vector()}")
         u |= m
+        print(f"union_all #{i+1}: u.grid.sv: {u.grid.compute_size_vector()}")
         
     return u
