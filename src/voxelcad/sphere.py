@@ -6,19 +6,16 @@ from voxelcad.voxel_model import VoxelModel
 from voxelcad.voxel_grid  import VoxelGrid
 
 class Sphere(VoxelModel):
-    def __init__(self, r, res=None, **kwargs):
+    def __init__(self, r, voxel_size=None, **kwargs):
         super().__init__(**kwargs)
         self.r = r
         #construct_grid
-        size_vector = np.array(2*r)*np.ones(3)
-        if res is None:
-            res = ENV.res
-        res_vector  = (np.array(res)*np.ones(3)).astype('uint')
-        sx,sy,sz = size_vector/2
+        sv = np.array(2*r)*np.ones(3)
+        sx,sy,sz = sv/2
         self.grid = VoxelGrid(xlim=(-sx,sx),
                               ylim=(-sy,sy),
                               zlim=(-sz,sz),
-                              res=res_vector)
+                              voxel_size=voxel_size)
         
     def render_volume(self):
         super().render_volume()

@@ -1,14 +1,12 @@
 import numpy as np
 
-import voxelcad.environment as ENV
-
 from voxelcad.voxel_model import VoxelModel
 from voxelcad.voxel_grid  import VoxelGrid
 
 from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED
 
 class Cylinder(VoxelModel):
-    def __init__(self,h,r=None, r1=None, r2=None, center=False, res=None, **kwargs):
+    def __init__(self,h,r=None, r1=None, r2=None, center=False, voxel_size=None, **kwargs):
         super().__init__(**kwargs)
         self.h = h
         if r is not None:
@@ -22,9 +20,6 @@ class Cylinder(VoxelModel):
             self.size_vector = np.array((2*r_max,2*r_max,h))
             self.r1 = r1
             self.r2 = r2
-        if res is None:
-            res = ENV.res
-        self.res_vector  = (np.array(res)*np.ones(3)).astype('uint')
         self.center = center
         #set up grid dimensions
         # X and Y are always centered
@@ -35,14 +30,14 @@ class Cylinder(VoxelModel):
             self.grid = VoxelGrid(xlim=(-sx,sx),
                                   ylim=(-sy,sy),
                                   zlim=(-sz,sz),
-                                  res=self.res_vector)
+                                  voxel_size=voxel_size)
         else:    
             # start Z at zero
             sx,sy,sz = sv
             self.grid = VoxelGrid(xlim=(-sx,sx), 
                                   ylim=(-sy,sy),
                                   zlim=(0,sz),
-                                  res=self.res_vector)
+                                  voxel_size=voxel_size)
                                   
     def render_volume(self):
         super().render_volume()
@@ -57,7 +52,7 @@ class Cylinder(VoxelModel):
         Pz = Zc/h + 0.5  # 0 at -h/2, 1 at h/2
         #interpolate radii along Z
         R = r1*(1.0-Pz) + r2*Pz
-        V[m:-m,m:-m,m:-m] = (Xc**2 + Yc**2 <= R**2) & ((0 <= Pz) & (Pz <= 1.0))
+        V[m:-m,m:-m,m:-m] = (Xc**2 + Yc**2 <= R**2) & ((0.0 <= Pz) & (Pz <= 1.0))
         self.voxel_data = V
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         return self.voxel_data
