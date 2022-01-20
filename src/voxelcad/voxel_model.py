@@ -5,11 +5,10 @@ import pyvista as pv
 
 import voxelcad.environment as ENV
 
-from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED, LOGGER
-LOGGER.setLevel("DEBUG")
+from voxelcad.debug import create_logger, currentframe, DEBUG_TAG, DEBUG_EMBED, MEMORY_USAGE
+LOGGER = create_logger(__name__)
 
 from voxelcad.voxel_grid import VoxelGrid, UniformGrid
-
 
 
 class VoxelModel:
@@ -29,8 +28,13 @@ class VoxelModel:
         self.pv_surf      = pv_surf
         
     def render_uniform_grid(self, volume_scale=255):
-         #REF https://docs.pyvista.org/examples/00-load/create-uniform-grid.html
-         #render the voxels first
+        #REF https://docs.pyvista.org/examples/00-load/create-uniform-grid.html
+        #render the voxels first
+        LOGGER.info(40*"*")
+        LOGGER.info(f"{self.__class__} -> super().render_uniform_grid")
+        mem0 = MEMORY_USAGE()
+        LOGGER.info(f"TOTAL MEMORY USED: {mem0/2**30:0.2f} GB")
+        LOGGER.info(40*"-")
         if self.voxel_data is None:
             self.render_volume()
         #get a numpy array of the grid points
@@ -47,6 +51,10 @@ class VoxelModel:
         #grid.origin = (100, 33, 55.6)  # The bottom left corner of the data set
         ugrid.spacing = vsv  # These are the cell sizes along each axis
         ugrid.cell_data['vol'] = volume_scale*V.flatten(order="F") #NOTE column-major (Fortran) order must be specified!
+        LOGGER.info(f"END render_uniform_grid")
+        mem = MEMORY_USAGE(offset=mem0)
+        LOGGER.info(f"DELTA MEMORY USED: {mem/2**30:0.2f} GB")
+        LOGGER.info(40*"*")
         return ugrid
             
     def render_volume(self):
@@ -56,6 +64,11 @@ class VoxelModel:
     def render_volume_mesh(self, cache=True):
         #REF https://stackoverflow.com/questions/6030098/how-to-display-a-3d-plot-of-a-3d-array-isosurface-in-matplotlib-mplot3d-or-simil/35472146
         #get from cache if already computed
+        LOGGER.info(40*"*")
+        LOGGER.info(f"{self.__class__} -> super().render_volume_mesh")
+        mem0 = MEMORY_USAGE()
+        LOGGER.info(f"TOTAL MEMORY USED: {mem0/2**30:0.2f} GB")
+        LOGGER.info(40*"-")
         if cache and self.pv_vol is not None:
             return self.pv_vol
         pv_grid = self.render_uniform_grid()
@@ -63,6 +76,10 @@ class VoxelModel:
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         if cache:
             self.pv_vol = pv_vol
+        LOGGER.info(f"END render_volume_mesh")
+        mem = MEMORY_USAGE(offset=mem0)
+        LOGGER.info(f"DELTA MEMORY USED: {mem/2**30:0.2f} GB")
+        LOGGER.info(40*"*")
         return pv_vol
 
     def render_surface_mesh(self, 
@@ -73,7 +90,11 @@ class VoxelModel:
                             ):
         #REF https://stackoverflow.com/questions/6030098/how-to-display-a-3d-plot-of-a-3d-array-isosurface-in-matplotlib-mplot3d-or-simil/35472146
         #REF https://docs.pyvista.org/examples/00-load/create-uniform-grid.html
-
+        LOGGER.info(40*"*")
+        LOGGER.info(f"{self.__class__} -> super().render_surface_mesh")
+        mem0 = MEMORY_USAGE()
+        LOGGER.info(f"TOTAL MEMORY USED: {mem0/2**30:0.2f} GB")
+        LOGGER.info(40*"-")
         #get from cache if already computed
         if cache and self.pv_surf is not None:
             return self.pv_surf
@@ -94,6 +115,10 @@ class VoxelModel:
             pv_surf = pv_surf.extract_largest()
         if cache:
             self.pv_surf = pv_surf
+        LOGGER.info(f"END render_surface_mesh")
+        mem = MEMORY_USAGE(offset=mem0)
+        LOGGER.info(f"DELTA MEMORY USED: {mem/2**30:0.2f} GB")
+        LOGGER.info(40*"*")
         return pv_surf
         
     def plot(self, *args,**kwargs):
@@ -111,14 +136,36 @@ class VoxelModel:
     def test_points(self, X, Y, Z):
         """ test if points defined by mesh X, Y, Z are in the volume
         """
-        LOGGER.debug(f"{self.__class__} -> {__class__}.test_points")
+        LOGGER.info(40*"*")
+        LOGGER.info(f"{self.__class__} -> super().test_points")
+        mem0 = MEMORY_USAGE()
+        LOGGER.info(f"TOTAL MEMORY USED: {mem0/2**30:0.2f} GB")
+        LOGGER.info(40*"-")
+        I,J,K = self.index_transform(X,Y,Z)
+        #use indices to interpolate the voxel data between the margins
+        if self.voxel_data is None:  #render the voxels first
+            self.render_volume()
+        m = self.grid.margin
+        V = self.voxel_data[m:-m,m:-m,m:-m]
+        in_volume = np.where((I >=0) & (J >=0) & (K >=0),V[I,J,K],False)
+        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
+        LOGGER.info(f"END test_points")
+        mem = MEMORY_USAGE(offset=mem0)
+        LOGGER.info(f"DELTA MEMORY USED: {mem/2**30:0.2f} GB")
+        LOGGER.info(40*"*")
+        return in_volume
+
+    def index_transform(self,X,Y,Z):
+        LOGGER.info(40*"*")
+        LOGGER.info(f"{self.__class__} -> super().index_transform")
+        mem0 = MEMORY_USAGE()
+        LOGGER.info(f"TOTAL MEMORY USED: {mem0/2**30:0.2f} GB")
+        LOGGER.info(40*"-")
         LOGGER.debug(f"test_points: X.min()={X.min()},  X.max()={X.max()}")
         LOGGER.debug(f"test_points: Y.min()={Y.min()},  Y.max()={Y.max()}")
         LOGGER.debug(f"test_points: Z.min()={Z.min()},  Z.max()={Z.max()}")
         x0,x1 = self.grid.xlim; y0,y1 = self.grid.ylim; z0,z1 = self.grid.zlim
         rx, ry, rz = self.grid.res_vector
-        #first test if the points are within the bounding box of the grid
-        in_bounds = (x0 <= X) & (X <= x1) & (y0 <= Y) & (Y <= y1) & (z0 <= Z) & (Z <= z1)
         #transform into data indices, giving dummy values (-1) to points outside bounds
         i_test = np.floor(rx*(X-x0)/(x1-x0)).astype('int')
         j_test = np.floor(ry*(Y-y0)/(y1-y0)).astype('int')
@@ -127,20 +174,20 @@ class VoxelModel:
         LOGGER.debug(f"test_points: j_test.min()={j_test.min()},  j_test.max()={j_test.max()}")
         LOGGER.debug(f"test_points: k_test.min()={k_test.min()},  k_test.max()={k_test.max()}")
         #filter based on bounds and index checking
-        I = np.where(in_bounds & (0 <= i_test) & (i_test < rx),i_test,-1)
-        J = np.where(in_bounds & (0 <= j_test) & (j_test < ry),j_test,-1)
-        K = np.where(in_bounds & (0 <= k_test) & (k_test < rz),k_test,-1)
+        # I = np.where(in_bounds & (0 <= i_test) & (i_test < rx),i_test,-1)
+        # J = np.where(in_bounds & (0 <= j_test) & (j_test < ry),j_test,-1)
+        # K = np.where(in_bounds & (0 <= k_test) & (k_test < rz),k_test,-1)
+        I = np.where((0 <= i_test) & (i_test < rx),i_test,-1)
+        J = np.where((0 <= j_test) & (j_test < ry),j_test,-1)
+        K = np.where((0 <= k_test) & (k_test < rz),k_test,-1)
         LOGGER.debug(f"test_points: I.min()={I.min()},  I.max()={I.max()}")
         LOGGER.debug(f"test_points: J.min()={J.min()},  J.max()={J.max()}")
         LOGGER.debug(f"test_points: K.min()={K.min()},  K.max()={K.max()}")
-        #use indices to interpolate the voxel data between the margins
-        if self.voxel_data is None:  #render the voxels first
-            self.render_volume()
-        m = self.grid.margin
-        V = self.voxel_data[m:-m,m:-m,m:-m]
-        in_volume = np.where((I >=0) & (J >=0) & (K >=0),V[I,J,K],False)
-        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
-        return in_volume
+        LOGGER.info(f"END index_transform")
+        mem = MEMORY_USAGE(offset=mem0)
+        LOGGER.info(f"DELTA MEMORY USED: {mem/2**30:0.2f} GB")
+        LOGGER.info(40*"*")
+        return I,J,K
 
     def translate(self, v):
         if self.voxel_data is None:  #render the voxels first

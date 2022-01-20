@@ -1,7 +1,7 @@
 import numpy as np
 import pyvista as pv
 
-from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED, LOGGER
+from voxelcad.debug import create_logger, currentframe, DEBUG_TAG, DEBUG_EMBED, MEMORY_USAGE
 
 import voxelcad.environment as ENV
 
