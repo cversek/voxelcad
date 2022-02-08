@@ -21,7 +21,7 @@ class GyroidCube(Cube):
     def render_volume(self):
         # REF https://forum.freecadweb.org/viewtopic.php?t=19819#p233282
         super().render_volume()
-        X,Y,Z,V,m = self.grid.construct_mesh()
+        X,Y,Z = self.grid.construct_mesh()
         # the gyroid is defined as continuous function on the mesh
         a = pi*self.lattice_param
         X *= a
@@ -30,9 +30,10 @@ class GyroidCube(Cube):
         F = cos(X)*sin(Y) + cos(Y)*sin(Z) + cos(Z)*sin(X) - self.structure_param
         # threshold to make solid and fill space between margins
         if self.thresh1 is not None and self.thresh2 is not None:
-            V[m:-m,m:-m,m:-m] =  ((F > self.thresh1) & (F < self.thresh2))
+            V =  ((F > self.thresh1) & (F < self.thresh2))
         elif self.thresh1 is not None:
-            V[m:-m,m:-m,m:-m] = (F > 0) & (F < self.thresh1)
+            #V[m:-m,m:-m,m:-m] = (F > 0) & (F < self.thresh1)
+            V = (F > 0) & (F < self.thresh1)
         else:
             raise ValueError("Either or both thresh1, thresh2 should not be None")
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())

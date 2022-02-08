@@ -42,7 +42,7 @@ class Cylinder(VoxelModel):
     def render_volume(self):
         super().render_volume()
         cx,cy,cz  = self.grid.compute_center_vector()
-        X,Y,Z,V,m = self.grid.construct_mesh()
+        X,Y,Z = self.grid.construct_mesh()
         # fill the cylindrical volume between the margins
         Xc = X-cx; Yc = Y-cy; Zc = Z-cz
         h = self.h
@@ -52,7 +52,7 @@ class Cylinder(VoxelModel):
         Pz = Zc/h + 0.5  # 0 at -h/2, 1 at h/2
         #interpolate radii along Z
         R = r1*(1.0-Pz) + r2*Pz
-        V[m:-m,m:-m,m:-m] = (Xc**2 + Yc**2 <= R**2) & ((0.0 <= Pz) & (Pz <= 1.0))
+        V = (Xc**2 + Yc**2 <= R**2) & ((0.0 <= Pz) & (Pz <= 1.0))
         self.voxel_data = V
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         return self.voxel_data

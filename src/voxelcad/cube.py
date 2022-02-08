@@ -11,9 +11,8 @@ class Cube(VoxelModel):
     def __init__(self, size, voxel_size=None, center=False, **kwargs):
         super().__init__(**kwargs)
         self.size = np.array(size)*np.ones(3)
-        self.center = center
         #set up grid dimensions
-        if self.center:
+        if center:
             sx,sy,sz = self.size/2
             self.grid = VoxelGrid(xlim=(-sx,sx),
                                   ylim=(-sy,sy),
@@ -29,13 +28,14 @@ class Cube(VoxelModel):
     def render_volume(self):
         super().render_volume() # will construct_grid if it is None
         # fill all of the cubic volume between the margins
-        X,Y,Z,V,m = self.grid.construct_mesh()
+        X,Y,Z = self.grid.construct_mesh()
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         sx,sy,sz = self.size
         cx,cy,cz = self.grid.compute_center_vector()
-        V[m:-m,m:-m,m:-m] = (np.abs(X-cx) <= sx/2) &\
-                            (np.abs(Y-cy) <= sy/2) &\
-                            (np.abs(Z-cz) <= sz/2)
+        V = (np.abs(X-cx) <= sx/2) &\
+            (np.abs(Y-cy) <= sy/2) &\
+            (np.abs(Z-cz) <= sz/2)
+        #V = np.packbits(V)
         self.voxel_data = V
         return self.voxel_data
 

@@ -16,7 +16,7 @@ class UniformGrid(pv.UniformGrid):
         
 
 class VoxelGrid:
-    def __init__(self,xlim,ylim,zlim,voxel_size,margin=2):
+    def __init__(self,xlim,ylim,zlim,voxel_size):
         assert(xlim[0] < xlim[1]);assert(ylim[0] < ylim[1]);assert(zlim[0] < zlim[1])
         self.xlim = np.array(xlim)
         self.ylim = np.array(ylim)
@@ -30,10 +30,6 @@ class VoxelGrid:
         sv = self.compute_size_vector()
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals(),exit=False)
         self.res_vector  = np.ceil(sv/vsv).astype('uint')
-        #NOTE must have a 1 voxel margin at edges for surface algos to work properly
-        margin = int(margin)
-        assert(margin >= 1)
-        self.margin = margin
         
     def compute_size_vector(self):
         x0,x1 = self.xlim; y0,y1 = self.ylim; z0,z1 = self.zlim
@@ -59,7 +55,7 @@ class VoxelGrid:
         ))
         return C
         
-    def construct_mesh(self, make_empty_voxels=True, voxel_dtype = 'bool'):   
+    def construct_mesh(self, make_empty_voxels=False, voxel_dtype = 'bool'):   
         rx,ry,rz    = self.res_vector
         vsx,vsy,vsz = self.voxel_size_vector 
         x0,x1 = self.xlim; y0,y1 = self.ylim; z0,z1 = self.zlim
@@ -70,9 +66,9 @@ class VoxelGrid:
         X,Y,Z =  np.mgrid[xcc0:xcc1:rx*1j, ycc0:ycc1:ry*1j, zcc0:zcc1:rz*1j]
         if make_empty_voxels:
             #build an empty voxel array with a margin
-            m = self.margin
-            V = np.zeros(self.res_vector+2*m).astype(voxel_dtype)
-            return (X,Y,Z,V,m)
+            V = np.zeros(self.res_vector).astype(voxel_dtype)
+            #V = np.packbits(V)
+            return (X,Y,Z,V)
         else:
             return (X,Y,Z)
 
