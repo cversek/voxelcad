@@ -1,4 +1,4 @@
-import os
+import os, time
 from typing import OrderedDict
 import numpy as np
 import pyvista as pv
@@ -63,6 +63,7 @@ class VoxelModel:
     def render_volume_mesh(self, cache=True):
         #REF https://stackoverflow.com/questions/6030098/how-to-display-a-3d-plot-of-a-3d-array-isosurface-in-matplotlib-mplot3d-or-simil/35472146
         #get from cache if already computed
+        t0 = time.time()
         LOGGER.info(40*"*")
         LOGGER.info(f"{self.__class__} -> super().render_volume_mesh")
         mem0 = MEMORY_USAGE()
@@ -75,7 +76,8 @@ class VoxelModel:
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         if cache:
             self.pv_vol = pv_vol
-        LOGGER.info(f"END render_volume_mesh")
+        t1 = time.time()
+        LOGGER.info(f"END render_volume_mesh, time: {t1-t0:0.1f} s")
         mem = MEMORY_USAGE(offset=mem0)
         LOGGER.info(f"DELTA MEMORY USED: {mem/2**30:0.2f} GB")
         LOGGER.info(40*"*")
@@ -83,12 +85,14 @@ class VoxelModel:
 
     def render_surface_mesh(self, 
                             cache=True,
+                            use_meshfix = True,
                             smooth_iters = 0,
                             downscale_times = 0,
                             only_largest_component = False,
                             ):
         #REF https://stackoverflow.com/questions/6030098/how-to-display-a-3d-plot-of-a-3d-array-isosurface-in-matplotlib-mplot3d-or-simil/35472146
         #REF https://docs.pyvista.org/examples/00-load/create-uniform-grid.html
+        t0 = time.time()
         LOGGER.info(40*"*")
         LOGGER.info(f"{self.__class__} -> super().render_surface_mesh")
         mem0 = MEMORY_USAGE()
@@ -100,21 +104,46 @@ class VoxelModel:
         import pyvista as pv
         #render the volume mesh first
         pv_vol  = self.render_volume_mesh()
-        pv_surf = pv_vol.extract_surface()
+        pv_surf = pv_vol.extract_surface() #(nonlinear_subdivision=5)  #FIXME
         #do filtering steps
+        if use_meshfix:
+            _t0 = time.time()
+            LOGGER.info(f"\trunning meshfix.repair()...")
+            #repair holes in mesh
+            import pymeshfix as mf
+            meshfix = mf.MeshFix(pv_surf)
+            meshfix.repair(verbose=True, joincomp=True)
+            pv_surf = meshfix.mesh
+            LOGGER.info(f"\t...completed in {time.time()-_t0:0.1f} s")
         if smooth_iters > 0:
+            _t0 = time.time()
+            LOGGER.info(f"\trunning smooth...")
             pv_surf = pv_surf.smooth(n_iter=smooth_iters,progress_bar=True)
+            LOGGER.info(f"\t...completed in {time.time()-_t0:0.1f} s")
         if downscale_times > 0:
+            _t0 = time.time()
+            LOGGER.info(f"\trunning downscale_trimesh...")
             #we use pyvista to clean up the mesh
             pv_surf = pv_surf.triangulate() #must be triangulated
             from voxelcad.utils.pyvista_tools import downscale_trimesh
             #cut the number of triangles down by 2**3 times
-            pv_surf = downscale_trimesh(pv_surf,repeat=downscale_times,decimation_factor=0.5)
+            pv_surf = downscale_trimesh(pv_surf,smooth_iters=smooth_iters,repeat=downscale_times,decimation_factor=0.5)
+            LOGGER.info(f"\t...completed in {time.time()-_t0:0.1f} s")
+            if use_meshfix:
+                _t0 = time.time()
+                LOGGER.info(f"\trunning meshfix.repair() again after downscale...")
+                #repair holes in mesh
+                import pymeshfix as mf
+                meshfix = mf.MeshFix(pv_surf)
+                meshfix.repair(verbose=True, joincomp=True)
+                pv_surf = meshfix.mesh
+                LOGGER.info(f"\t...completed in {time.time()-_t0:0.1f} s")
         if only_largest_component:
             pv_surf = pv_surf.extract_largest()
         if cache:
             self.pv_surf = pv_surf
-        LOGGER.info(f"END render_surface_mesh")
+        t1 = time.time()
+        LOGGER.info(f"END render_surface_mesh, time: {t1-t0:0.1f} s")
         mem = MEMORY_USAGE(offset=mem0)
         LOGGER.info(f"DELTA MEMORY USED: {mem/2**30:0.2f} GB")
         LOGGER.info(40*"*")
