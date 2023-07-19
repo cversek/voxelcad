@@ -16,7 +16,7 @@ except NameError:
 
 PACKAGE_METADATA = {
     'name'         : 'voxelcad',
-    'version'      : 'dev',
+    'version'      : '0.0.1',
     'author'       : "Craig Wm. Versek",
     'author_email' : "cversek@gmail.com",
 }
