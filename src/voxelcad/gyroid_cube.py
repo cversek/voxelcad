@@ -7,14 +7,16 @@ from voxelcad.cube import Cube
 
 class GyroidCube(Cube):
     def __init__(self, size, 
-                 lattice_param = 1.0, 
-                 structure_param=0.0, 
+                 lattice_param = [1.0,1.0,1.0], 
+                 structure_param=0.0,
+                 phi = [0.0,0.0,0.0], 
                  thresh1=1.0, 
                  thresh2=None, 
                  **kwargs):
         super().__init__(size, **kwargs)
-        self.lattice_param = lattice_param
+        self.lattice_param = np.array(lattice_param)*np.ones(3)
         self.structure_param = structure_param
+        self.phi = phi
         self.thresh1 = thresh1
         self.thresh2 = thresh2
     
@@ -24,10 +26,13 @@ class GyroidCube(Cube):
         X,Y,Z = self.grid.construct_mesh()
         # the gyroid is defined as continuous function on the mesh
         a = pi*self.lattice_param
-        X *= a
-        Y *= a
-        Z *= a
-        F = cos(X)*sin(Y) + cos(Y)*sin(Z) + cos(Z)*sin(X) - self.structure_param
+        X *= a[0]
+        Y *= a[1]
+        Z *= a[2]
+        phi = self.phi
+        F = cos(X + phi[0])*sin(Y + phi[1]) +\
+            cos(Y + phi[1])*sin(Z + phi[2]) +\
+            cos(Z + phi[2])*sin(X + phi[0]) - self.structure_param
         # threshold to make solid and fill space between margins
         if self.thresh1 is not None and self.thresh2 is not None:
             V =  ((F > self.thresh1) & (F < self.thresh2))
