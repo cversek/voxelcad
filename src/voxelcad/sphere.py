@@ -21,9 +21,9 @@ class Sphere(VoxelModel):
         super().render_volume()
         r = self.r
         cx,cy,cz  = self.grid.compute_center_vector()
-        X,Y,Z,V,m = self.grid.construct_mesh()
+        X,Y,Z = self.grid.construct_mesh()
         # fill the spherical volume between the margins
-        V[m:-m,m:-m,m:-m] = ((X-cx)**2 + (Y-cy)**2 + (Z-cz)**2 <= r**2)
+        V = ((X-cx)**2 + (Y-cy)**2 + (Z-cz)**2 <= r**2)
         self.voxel_data = V
         return self.voxel_data
 
