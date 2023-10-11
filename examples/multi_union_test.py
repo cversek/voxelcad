@@ -1,13 +1,9 @@
-from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED, LOGGER
-LOGGER.setLevel("DEBUG")
+from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED, create_logger
+LOGGER = create_logger(name=__name__)
 
 
 from voxelcad import Cube, union_all
 import voxelcad.environment as ENV
-
-
-
-
 
 
 #let's add up the longest dimesion to choose a good voxel size based on the specified RES
@@ -20,5 +16,3 @@ NUM = 5
 M = [Cube(CUBE_SIZE).translate([0,0,i*Z_SPACING]) for i in range(NUM)]
 M = union_all(M)
 M.plot(color='white',show_edges=True)
-
-

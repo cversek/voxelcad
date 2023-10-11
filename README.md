@@ -18,10 +18,25 @@ The following image is of the part made with a Formlabs Form3 SLA 3D printer usi
 
 <img src="images/gyroid_cylinder_3d_print_form3_flexible80A.jpg" alt="3d printed gyroid cylinder" width="512"/>
 
-## Installation
+## Installation with Conda Environment
+Setup dependencies:
 ```
-python setup.py install
+conda create -n voxelcad
+conda activate voxelcad
+conda install -c conda-forge pyvista ipython tqdm
 ```
+In package root with `setup.py` file:
+```
+pip install -e .
+
+```
+Note, as of 2023-07-19 the dependency `pymeshfix` is broken in conda supported releases up to `0.16.1`, so we can get from the source repo:
+```
+git clone https://github.com/pyvista/pymeshfix.git
+cd pymeshfix
+git checkout v0.16.2
+pip install -e .
+``` 
 
 ## Authors and acknowledgment
 "Craig Versek" <cversek@gmail.com>
