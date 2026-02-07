@@ -24,20 +24,14 @@ class Cube(VoxelModel):
                                   ylim=(0,sy),
                                   zlim=(0,sz),
                                   voxel_size=voxel_size)
-        
-    def render_volume(self):
-        super().render_volume() # will construct_grid if it is None
-        # fill all of the cubic volume between the margins
-        X,Y,Z = self.grid.construct_mesh()
-        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
+
+    def evaluate_slice(self, X_2d, Y_2d, z_val):
         sx,sy,sz = self.size
         cx,cy,cz = self.grid.compute_center_vector()
-        V = (np.abs(X-cx) <= sx/2) &\
-            (np.abs(Y-cy) <= sy/2) &\
-            (np.abs(Z-cz) <= sz/2)
-        #V = np.packbits(V)
-        self.voxel_data = V
-        return self.voxel_data
+        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
+        return (np.abs(X_2d-cx) <= sx/2) &\
+               (np.abs(Y_2d-cy) <= sy/2) &\
+               (np.abs(z_val-cz) <= sz/2)
 
 ################################################################################
 # TEST CODE
@@ -45,11 +39,4 @@ class Cube(VoxelModel):
 if __name__ == "__main__":
     M = Cube(10,res=32)
     M.plot(show=True)
-    M.export("test_model_cube10.png")
     M.export("test_model_cube10.stl")
-    M.export("test_model_cube10.nii")
-    M = Cube([10,20,30],res=32)
-    M.plot(show=True)
-    M.export("test_model_cube10x20x30.png")
-    M.export("test_model_cube10x20x30.stl")
-    M.export("test_model_cube10x20x30.nii")

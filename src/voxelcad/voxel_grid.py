@@ -5,15 +5,17 @@ from voxelcad.debug import create_logger, currentframe, DEBUG_TAG, DEBUG_EMBED, 
 
 import voxelcad.environment as ENV
 
-#subclass the pyvista UniformGrid class to provide convenient extensions
-class UniformGrid(pv.UniformGrid):
+# PyVista 0.43+ renamed UniformGrid to ImageData
+_PVGridBase = getattr(pv, 'ImageData', None) or pv.UniformGrid
+
+class UniformGrid(_PVGridBase):
     #overload plots with some helpful defaults
     def plot(volume=True, opacity="sigmoid", cmap="coolwarm",*args,**kwargs):
         kwargs['volume']  = volume
         kwargs['opacity'] = opacity
         kwargs['cmap']    = cmap
         super().plot(*args,**kwargs)
-        
+
 
 class VoxelGrid:
     def __init__(self,xlim,ylim,zlim,voxel_size):
@@ -30,11 +32,11 @@ class VoxelGrid:
         sv = self.compute_size_vector()
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals(),exit=False)
         self.res_vector  = np.ceil(sv/vsv).astype('uint')
-        
+
     def compute_size_vector(self):
         x0,x1 = self.xlim; y0,y1 = self.ylim; z0,z1 = self.zlim
         return np.array((x1-x0,y1-y0,z1-z0))
-        
+
     def compute_center_vector(self):
         x0,x1 = self.xlim; y0,y1 = self.ylim; z0,z1 = self.zlim
         return np.array(((x0+x1)/2,(y0+y1)/2,(z0+z1)/2))
@@ -54,23 +56,34 @@ class VoxelGrid:
             (x1,y1,z1)
         ))
         return C
-        
-    def construct_mesh(self, make_empty_voxels=False, voxel_dtype = 'bool'):   
+
+    def compute_cell_center_ranges(self):
+        """Compute cell-center coordinate ranges for each axis.
+
+        Returns (xcc, ycc, zcc) where each is a 1D array of cell centers.
+        """
         rx,ry,rz    = self.res_vector
-        vsx,vsy,vsz = self.voxel_size_vector 
+        vsx,vsy,vsz = self.voxel_size_vector
         x0,x1 = self.xlim; y0,y1 = self.ylim; z0,z1 = self.zlim
-        #transform to center cell coords
-        xcc0=x0+vsx/2.0; xcc1=x1-vsx/2.0
-        ycc0=y0+vsy/2.0; ycc1=y1-vsy/2.0
-        zcc0=z0+vsz/2.0; zcc1=z1-vsz/2.0
-        X,Y,Z =  np.mgrid[xcc0:xcc1:rx*1j, ycc0:ycc1:ry*1j, zcc0:zcc1:rz*1j]
-        if make_empty_voxels:
-            #build an empty voxel array with a margin
-            V = np.zeros(self.res_vector).astype(voxel_dtype)
-            #V = np.packbits(V)
-            return (X,Y,Z,V)
-        else:
-            return (X,Y,Z)
+        xcc = np.linspace(x0+vsx/2.0, x1-vsx/2.0, int(rx))
+        ycc = np.linspace(y0+vsy/2.0, y1-vsy/2.0, int(ry))
+        zcc = np.linspace(z0+vsz/2.0, z1-vsz/2.0, int(rz))
+        return xcc, ycc, zcc
+
+    def iter_slices(self):
+        """Yield (X_2d, Y_2d, z_val, k) for each Z-level.
+
+        X_2d and Y_2d are 2D coordinate arrays of shape (rx, ry).
+        z_val is the scalar z coordinate for this slice.
+        k is the Z-index (0-based).
+
+        Memory: only 2D arrays (~16 MB at 1024^2) instead of 3D (~24 GB at 1024^3).
+        """
+        xcc, ycc, zcc = self.compute_cell_center_ranges()
+        # pre-allocate 2D coordinate grids (reused each iteration)
+        X_2d, Y_2d = np.meshgrid(xcc, ycc, indexing='ij')
+        for k, z_val in enumerate(zcc):
+            yield X_2d, Y_2d, z_val, k
 
     def __or__(self, other): #union
         #minimin, maximax
@@ -82,8 +95,8 @@ class VoxelGrid:
                 max(self.zlim[1],other.zlim[1]))
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals(),exit=False)
         return VoxelGrid._construct_new_bounding_grid(self,other,xlim,ylim,zlim)
-        
-        
+
+
     def __and__(self, other): #intersection
         #maximin, minimax
         xlim = (max(self.xlim[0],other.xlim[0]),
