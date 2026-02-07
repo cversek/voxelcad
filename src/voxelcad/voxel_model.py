@@ -5,7 +5,7 @@ import pyvista as pv
 
 import voxelcad.environment as ENV
 
-from voxelcad.debug import create_logger, currentframe, DEBUG_TAG, DEBUG_EMBED, MEMORY_USAGE
+from voxelcad.debug import create_logger, currentframe, DEBUG_TAG, DEBUG_EMBED, MEMORY_USAGE, TIMING_START, TIMING_END
 LOGGER = create_logger(__name__)
 
 from voxelcad.voxel_grid import VoxelGrid, UniformGrid
@@ -62,6 +62,7 @@ class VoxelModel:
         """
         if self.grid is None:
             self.construct_grid()
+        TIMING_START("render_volume")
         LOGGER.info(40*"*")
         LOGGER.info(f"{self.__class__} -> render_volume (streaming)")
         mem0 = MEMORY_USAGE()
@@ -77,10 +78,12 @@ class VoxelModel:
         mem = MEMORY_USAGE(offset=mem0)
         LOGGER.info(f"DELTA MEMORY USED: {mem/2**30:0.2f} GB")
         LOGGER.info(40*"*")
+        TIMING_END("render_volume")
         return self.voxel_data
 
     def render_uniform_grid(self, volume_scale=255):
         #REF https://docs.pyvista.org/examples/00-load/create-uniform-grid.html
+        TIMING_START("render_uniform_grid")
         LOGGER.info(40*"*")
         LOGGER.info(f"{self.__class__} -> super().render_uniform_grid")
         mem0 = MEMORY_USAGE()
@@ -103,10 +106,12 @@ class VoxelModel:
         mem = MEMORY_USAGE(offset=mem0)
         LOGGER.info(f"DELTA MEMORY USED: {mem/2**30:0.2f} GB")
         LOGGER.info(40*"*")
+        TIMING_END("render_uniform_grid")
         return ugrid
 
     def render_volume_mesh(self, cache=True):
         #REF https://stackoverflow.com/questions/6030098/how-to-display-a-3d-plot-of-a-3d-array-isosurface-in-matplotlib-mplot3d-or-simil/35472146
+        TIMING_START("render_volume_mesh")
         t0 = time.time()
         LOGGER.info(40*"*")
         LOGGER.info(f"{self.__class__} -> super().render_volume_mesh")
@@ -125,6 +130,7 @@ class VoxelModel:
         mem = MEMORY_USAGE(offset=mem0)
         LOGGER.info(f"DELTA MEMORY USED: {mem/2**30:0.2f} GB")
         LOGGER.info(40*"*")
+        TIMING_END("render_volume_mesh")
         return pv_vol
 
     def render_surface_mesh(self,
@@ -134,6 +140,7 @@ class VoxelModel:
                             downscale_times = 0,
                             only_largest_component = False,
                             ):
+        TIMING_START("render_surface_mesh")
         t0 = time.time()
         LOGGER.info(40*"*")
         LOGGER.info(f"{self.__class__} -> super().render_surface_mesh")
@@ -182,6 +189,7 @@ class VoxelModel:
         mem = MEMORY_USAGE(offset=mem0)
         LOGGER.info(f"DELTA MEMORY USED: {mem/2**30:0.2f} GB")
         LOGGER.info(40*"*")
+        TIMING_END("render_surface_mesh")
         return pv_surf
 
     def plot(self, *args,**kwargs):
