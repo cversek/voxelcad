@@ -1,3 +1,5 @@
+__version__ = "0.1.0"
+
 from voxelcad.cube import Cube
 from voxelcad.sphere import Sphere
 from voxelcad.cylinder import Cylinder

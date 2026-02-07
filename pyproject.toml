@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voxelcad"
+dynamic = ["version"]
+description = "Voxel-based CAD tool for 3D design and printing"
+authors = [
+    {name = "Craig Wm. Versek", email = "cversek@gmail.com"},
+]
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.20",
+    "matplotlib>=3.0",
+]
+
+[project.optional-dependencies]
+viz = ["pyvista", "vtk", "pymeshfix"]
+
+[project.scripts]
+voxelcad_shell = "voxelcad.scripts.shell:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "voxelcad.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
