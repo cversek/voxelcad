@@ -22,10 +22,10 @@ class VoxelModel:
                  pv_surf = None,
                  ):
         self.grid = grid
-        # Auto-pack bool arrays for 8x storage reduction
+        # Auto-pack bool arrays for 8x storage reduction (F-order: Z-slices contiguous)
         if voxel_data is not None and voxel_data.dtype == np.bool_:
             self._voxel_shape = voxel_data.shape
-            self.voxel_data = np.packbits(voxel_data.ravel())
+            self.voxel_data = np.packbits(voxel_data.ravel(order='F'))
         else:
             self.voxel_data   = voxel_data
             self._voxel_shape = _voxel_shape
@@ -35,29 +35,27 @@ class VoxelModel:
         self.pv_surf      = pv_surf
 
     def _unpack_volume(self):
-        """Unpack stored uint8 data back to bool array with original shape."""
+        """Unpack stored uint8 data back to bool array with original shape (F-order)."""
         n = int(np.prod(self._voxel_shape))
-        return np.unpackbits(self.voxel_data)[:n].reshape(self._voxel_shape).view(np.bool_)
+        return np.unpackbits(self.voxel_data)[:n].reshape(self._voxel_shape, order='F').view(np.bool_)
 
-    def _lookup_packed_slice(self, I_2d, J_2d, k):
-        """Look up voxel values from packed storage for given 2D index arrays.
-
-        Uses vectorized bit extraction — no full unpack needed.
+    def _unpack_slice(self, k):
+        """Extract a single Z-slice from packed storage (F-order: Z-slices contiguous).
 
         Args:
-            I_2d: 2D int array of X-indices (must be in bounds)
-            J_2d: 2D int array of Y-indices (must be in bounds)
-            k: scalar Z-index
+            k: Z-index of the slice to extract
 
         Returns:
-            2D boolean array
+            2D boolean array of shape (rx, ry)
         """
         rx, ry, rz = self._voxel_shape
-        # C-order flat index: i * ry * rz + j * rz + k
-        flat_idx = I_2d * int(ry * rz) + J_2d * int(rz) + int(k)
-        byte_idx = flat_idx // 8
-        bit_pos = 7 - (flat_idx % 8)  # np.packbits is MSB-first
-        return ((self.voxel_data[byte_idx] >> bit_pos) & 1).astype('bool')
+        slice_size = rx * ry
+        start = k * slice_size
+        byte_start = start // 8
+        byte_end = (start + slice_size + 7) // 8
+        bits = np.unpackbits(self.voxel_data[byte_start:byte_end])
+        bit_offset = start - byte_start * 8
+        return bits[bit_offset:bit_offset + slice_size].reshape(rx, ry, order='F').view(np.bool_)
 
     def evaluate_slice(self, X_2d, Y_2d, z_val):
         """Evaluate this model's volume for a single Z-slice.
@@ -96,22 +94,23 @@ class VoxelModel:
         """
         if self._has_evaluate_slice():
             return self.evaluate_slice(X_2d, Y_2d, z_val)
-        # Fallback: coordinate-to-index mapping with vectorized bit extraction
+        # Fallback: extract Z-slice from packed storage, then index with X,Y
         if self.voxel_data is None:
             self.render_volume()
         x0, x1 = self.grid.xlim
         y0, y1 = self.grid.ylim
         z0, z1 = self.grid.zlim
         rx, ry, rz = self.grid.res_vector
-        # Map coordinates to indices
+        k = int(np.floor(rz * (z_val - z0) / (z1 - z0)))
+        if k < 0 or k >= rz:
+            return np.zeros(X_2d.shape, dtype='bool')
+        V_slice = self._unpack_slice(k)
         I = np.floor(rx * (X_2d - x0) / (x1 - x0)).astype('int')
         J = np.floor(ry * (Y_2d - y0) / (y1 - y0)).astype('int')
-        k = int(np.floor(rz * (z_val - z0) / (z1 - z0)))
-        valid = (I >= 0) & (I < rx) & (J >= 0) & (J < ry) & (k >= 0) & (k < rz)
+        valid = (I >= 0) & (I < rx) & (J >= 0) & (J < ry)
         I_safe = np.where(valid, I, 0)
         J_safe = np.where(valid, J, 0)
-        result = self._lookup_packed_slice(I_safe, J_safe, k)
-        return np.where(valid, result, False)
+        return np.where(valid, V_slice[I_safe, J_safe], False)
 
     def render_volume(self):
         """Render volume using streaming Z-slice evaluation.
@@ -132,7 +131,7 @@ class VoxelModel:
         for X_2d, Y_2d, z_val, k in self.grid.iter_slices():
             V[:, :, k] = self.evaluate_slice(X_2d, Y_2d, z_val)
         self._voxel_shape = V.shape
-        self.voxel_data = np.packbits(V.ravel())
+        self.voxel_data = np.packbits(V.ravel(order='F'))
         LOGGER.info(f"END render_volume")
         mem = MEMORY_USAGE(offset=mem0)
         LOGGER.info(f"DELTA MEMORY USED: {mem/2**30:0.2f} GB")
