@@ -39,6 +39,26 @@ class VoxelModel:
         n = int(np.prod(self._voxel_shape))
         return np.unpackbits(self.voxel_data)[:n].reshape(self._voxel_shape).view(np.bool_)
 
+    def _lookup_packed_slice(self, I_2d, J_2d, k):
+        """Look up voxel values from packed storage for given 2D index arrays.
+
+        Uses vectorized bit extraction — no full unpack needed.
+
+        Args:
+            I_2d: 2D int array of X-indices (must be in bounds)
+            J_2d: 2D int array of Y-indices (must be in bounds)
+            k: scalar Z-index
+
+        Returns:
+            2D boolean array
+        """
+        rx, ry, rz = self._voxel_shape
+        # C-order flat index: i * ry * rz + j * rz + k
+        flat_idx = I_2d * int(ry * rz) + J_2d * int(rz) + int(k)
+        byte_idx = flat_idx // 8
+        bit_pos = 7 - (flat_idx % 8)  # np.packbits is MSB-first
+        return ((self.voxel_data[byte_idx] >> bit_pos) & 1).astype('bool')
+
     def evaluate_slice(self, X_2d, Y_2d, z_val):
         """Evaluate this model's volume for a single Z-slice.
 
@@ -53,6 +73,45 @@ class VoxelModel:
         raise NotImplementedError(
             f"{self.__class__.__name__} must implement evaluate_slice()"
         )
+
+    def _has_evaluate_slice(self):
+        """Check if this model has a real geometry evaluation function."""
+        return type(self).evaluate_slice is not VoxelModel.evaluate_slice
+
+    def _get_slice_for_coords(self, X_2d, Y_2d, z_val):
+        """Get a boolean slice for the given coordinates.
+
+        If the model has evaluate_slice (primitives), uses it directly.
+        If the model only has packed data (transformed models), renders
+        if needed, then maps coordinates to indices and extracts bits
+        from packed storage without full unpack.
+
+        Args:
+            X_2d: 2D array of X coordinates
+            Y_2d: 2D array of Y coordinates
+            z_val: scalar Z coordinate
+
+        Returns:
+            2D boolean array
+        """
+        if self._has_evaluate_slice():
+            return self.evaluate_slice(X_2d, Y_2d, z_val)
+        # Fallback: coordinate-to-index mapping with vectorized bit extraction
+        if self.voxel_data is None:
+            self.render_volume()
+        x0, x1 = self.grid.xlim
+        y0, y1 = self.grid.ylim
+        z0, z1 = self.grid.zlim
+        rx, ry, rz = self.grid.res_vector
+        # Map coordinates to indices
+        I = np.floor(rx * (X_2d - x0) / (x1 - x0)).astype('int')
+        J = np.floor(ry * (Y_2d - y0) / (y1 - y0)).astype('int')
+        k = int(np.floor(rz * (z_val - z0) / (z1 - z0)))
+        valid = (I >= 0) & (I < rx) & (J >= 0) & (J < ry) & (k >= 0) & (k < rz)
+        I_safe = np.where(valid, I, 0)
+        J_safe = np.where(valid, J, 0)
+        result = self._lookup_packed_slice(I_safe, J_safe, k)
+        return np.where(valid, result, False)
 
     def render_volume(self):
         """Render volume using streaming Z-slice evaluation.
@@ -318,75 +377,71 @@ class VoxelModel:
         z0,z1 = zlim = (Ct[:,2].min(),Ct[:,2].max())
         new_grid = VoxelGrid(xlim,ylim,zlim,voxel_size=self.grid.voxel_size_vector)
         # Use streaming: iterate Z-slices of new grid, apply inverse transform,
-        # then test each slice against original volume
+        # then look up each point in original volume.
+        # Note: Z_orig varies per-pixel so evaluate_slice() can't be used here.
+        # Unpack the source volume once (or render it if needed), then index per-slice.
+        if self.voxel_data is None:
+            self.render_volume()
+        V_src = self._unpack_volume()
+        src_rx, src_ry, src_rz = self.grid.res_vector
+        sx0, sx1 = self.grid.xlim
+        sy0, sy1 = self.grid.ylim
+        sz0, sz1 = self.grid.zlim
         rx, ry, rz = new_grid.res_vector
         Vt = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
         for X_2d, Y_2d, z_val, k in new_grid.iter_slices():
-            # create Z_2d for this slice
             Z_2d = np.full_like(X_2d, z_val)
-            # invert the transform to map back to original data space
             X_orig = Minv[0,0]*X_2d + Minv[0,1]*Y_2d + Minv[0,2]*Z_2d
             Y_orig = Minv[1,0]*X_2d + Minv[1,1]*Y_2d + Minv[1,2]*Z_2d
             Z_orig = Minv[2,0]*X_2d + Minv[2,1]*Y_2d + Minv[2,2]*Z_2d
-            Vt[:, :, k] = self.test_points(X_orig, Y_orig, Z_orig)
+            # Map to source volume indices
+            I = np.floor(src_rx * (X_orig - sx0) / (sx1 - sx0)).astype('int')
+            J = np.floor(src_ry * (Y_orig - sy0) / (sy1 - sy0)).astype('int')
+            K = np.floor(src_rz * (Z_orig - sz0) / (sz1 - sz0)).astype('int')
+            valid = (I >= 0) & (I < src_rx) & (J >= 0) & (J < src_ry) & (K >= 0) & (K < src_rz)
+            I_safe = np.where(valid, I, 0)
+            J_safe = np.where(valid, J, 0)
+            K_safe = np.where(valid, K, 0)
+            Vt[:, :, k] = np.where(valid, V_src[I_safe, J_safe, K_safe], False)
+        del V_src
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         return VoxelModel(grid=new_grid,voxel_data=Vt)
 
     def __or__(self, other): #union
-        if self.voxel_data is None:
-            self.render_volume()
-        if other.voxel_data is None:
-            other.render_volume()
         bounding_grid = self.grid | other.grid
         rx, ry, rz = bounding_grid.res_vector
         V = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
         for X_2d, Y_2d, z_val, k in bounding_grid.iter_slices():
-            Z_2d = np.full_like(X_2d, z_val)
-            V[:, :, k]  = self.test_points(X_2d, Y_2d, Z_2d)
-            V[:, :, k] |= other.test_points(X_2d, Y_2d, Z_2d)
+            V[:, :, k]  = self._get_slice_for_coords(X_2d, Y_2d, z_val)
+            V[:, :, k] |= other._get_slice_for_coords(X_2d, Y_2d, z_val)
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         return VoxelModel(grid=bounding_grid,voxel_data=V)
 
     def __and__(self, other): #intersection
-        if self.voxel_data is None:
-            self.render_volume()
-        if other.voxel_data is None:
-            other.render_volume()
         bounding_grid = self.grid & other.grid
         rx, ry, rz = bounding_grid.res_vector
         V = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
         for X_2d, Y_2d, z_val, k in bounding_grid.iter_slices():
-            Z_2d = np.full_like(X_2d, z_val)
-            V[:, :, k]  = self.test_points(X_2d, Y_2d, Z_2d)
-            V[:, :, k] &= other.test_points(X_2d, Y_2d, Z_2d)
+            V[:, :, k]  = self._get_slice_for_coords(X_2d, Y_2d, z_val)
+            V[:, :, k] &= other._get_slice_for_coords(X_2d, Y_2d, z_val)
         return VoxelModel(grid=bounding_grid,voxel_data=V)
 
     def __xor__(self, other): #exclusive or
-        if self.voxel_data is None:
-            self.render_volume()
-        if other.voxel_data is None:
-            other.render_volume()
         bounding_grid = self.grid | other.grid
         rx, ry, rz = bounding_grid.res_vector
         V = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
         for X_2d, Y_2d, z_val, k in bounding_grid.iter_slices():
-            Z_2d = np.full_like(X_2d, z_val)
-            V[:, :, k]  = self.test_points(X_2d, Y_2d, Z_2d)
-            V[:, :, k] ^= other.test_points(X_2d, Y_2d, Z_2d)
+            V[:, :, k]  = self._get_slice_for_coords(X_2d, Y_2d, z_val)
+            V[:, :, k] ^= other._get_slice_for_coords(X_2d, Y_2d, z_val)
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         return VoxelModel(grid=bounding_grid,voxel_data=V)
 
     def __sub__(self, other): #difference
-        if self.voxel_data is None:
-            self.render_volume()
-        if other.voxel_data is None:
-            other.render_volume()
         rx, ry, rz = self.grid.res_vector
         V = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
         for X_2d, Y_2d, z_val, k in self.grid.iter_slices():
-            Z_2d = np.full_like(X_2d, z_val)
-            V[:, :, k]  =  self.test_points(X_2d, Y_2d, Z_2d)
-            V[:, :, k] &= ~other.test_points(X_2d, Y_2d, Z_2d)
+            V[:, :, k]  =  self._get_slice_for_coords(X_2d, Y_2d, z_val)
+            V[:, :, k] &= ~other._get_slice_for_coords(X_2d, Y_2d, z_val)
         return VoxelModel(grid=self.grid,voxel_data=V)
 
 def union_all(models):
