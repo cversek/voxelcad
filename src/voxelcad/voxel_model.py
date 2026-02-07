@@ -15,17 +15,29 @@ class VoxelModel:
     def __init__(self,
                  grid = None,
                  voxel_data = None,
+                 _voxel_shape = None,
                  surface_data = None,
                  mesh_data = None,
                  pv_vol = None,
                  pv_surf = None,
                  ):
         self.grid = grid
-        self.voxel_data   = voxel_data
+        # Auto-pack bool arrays for 8x storage reduction
+        if voxel_data is not None and voxel_data.dtype == np.bool_:
+            self._voxel_shape = voxel_data.shape
+            self.voxel_data = np.packbits(voxel_data.ravel())
+        else:
+            self.voxel_data   = voxel_data
+            self._voxel_shape = _voxel_shape
         self.surface_data = surface_data
         self.mesh_data    = mesh_data
         self.pv_vol       = pv_vol
         self.pv_surf      = pv_surf
+
+    def _unpack_volume(self):
+        """Unpack stored uint8 data back to bool array with original shape."""
+        n = int(np.prod(self._voxel_shape))
+        return np.unpackbits(self.voxel_data)[:n].reshape(self._voxel_shape).view(np.bool_)
 
     def evaluate_slice(self, X_2d, Y_2d, z_val):
         """Evaluate this model's volume for a single Z-slice.
@@ -59,7 +71,8 @@ class VoxelModel:
         V = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
         for X_2d, Y_2d, z_val, k in self.grid.iter_slices():
             V[:, :, k] = self.evaluate_slice(X_2d, Y_2d, z_val)
-        self.voxel_data = V
+        self._voxel_shape = V.shape
+        self.voxel_data = np.packbits(V.ravel())
         LOGGER.info(f"END render_volume")
         mem = MEMORY_USAGE(offset=mem0)
         LOGGER.info(f"DELTA MEMORY USED: {mem/2**30:0.2f} GB")
@@ -75,7 +88,7 @@ class VoxelModel:
         LOGGER.info(40*"-")
         if self.voxel_data is None:
             self.render_volume()
-        V = self.voxel_data
+        V = self._unpack_volume()
         rv  = self.grid.res_vector
         vsv = self.grid.voxel_size_vector
         ugrid = UniformGrid()
@@ -84,7 +97,8 @@ class VoxelModel:
         ugrid.dimensions = rv + 1
         # Edit the spatial reference
         ugrid.spacing = vsv  # These are the cell sizes along each axis
-        ugrid.cell_data['vol'] = volume_scale*V.flatten(order="F") #NOTE column-major (Fortran) order must be specified!
+        # .view(uint8) avoids int64 upcast (8 GB at 1024^3); stays in uint8
+        ugrid.cell_data['vol'] = V.flatten(order="F").view(np.uint8) * volume_scale
         LOGGER.info(f"END render_uniform_grid")
         mem = MEMORY_USAGE(offset=mem0)
         LOGGER.info(f"DELTA MEMORY USED: {mem/2**30:0.2f} GB")
@@ -193,7 +207,7 @@ class VoxelModel:
         I,J,K = self.index_transform(X,Y,Z)
         if self.voxel_data is None:
             self.render_volume()
-        V = self.voxel_data
+        V = self._unpack_volume()
         in_volume = np.where((I >=0) & (J >=0) & (K >=0),V[I,J,K],False)
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         LOGGER.info(f"END test_points")
@@ -235,7 +249,7 @@ class VoxelModel:
                              zlim=self.grid.zlim + v[2],
                              voxel_size=self.grid.voxel_size_vector,
                              )
-        vm = VoxelModel(grid=new_grid,voxel_data=self.voxel_data)
+        vm = VoxelModel(grid=new_grid,voxel_data=self.voxel_data,_voxel_shape=self._voxel_shape)
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         return vm
 
@@ -273,8 +287,8 @@ class VoxelModel:
             return (R,Rinv)
         else:
             m = self.apply_transformation(R,Rinv)
-            LOGGER.debug(f"rotate: m.shape: {m.voxel_data.shape}")
-            LOGGER.debug(f"\tm.sum: {m.voxel_data.sum()}")
+            LOGGER.debug(f"rotate: m._voxel_shape: {m._voxel_shape}")
+            LOGGER.debug(f"\tm.packed_bytes: {m.voxel_data.nbytes}")
             LOGGER.debug(f"\tm.grid: {m.grid!r}")
             return m
 
@@ -283,8 +297,8 @@ class VoxelModel:
         S    = np.array(((v[0],0,0),(0,v[1],0),(0,0,v[2])))
         Sinv = np.array(((1.0/v[0],0,0),(0,1.0/v[1],0),(0,0,1.0/v[2])))
         m = self.apply_transformation(S,Sinv)
-        LOGGER.debug(f"scale: m.shape: {m.voxel_data.shape}")
-        LOGGER.debug(f"\tm.sum: {m.voxel_data.sum()}")
+        LOGGER.debug(f"scale: m._voxel_shape: {m._voxel_shape}")
+        LOGGER.debug(f"\tm.packed_bytes: {m.voxel_data.nbytes}")
         LOGGER.debug(f"\tm.grid: {m.grid!r}")
         return m
 
