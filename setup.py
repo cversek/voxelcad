@@ -12,18 +12,11 @@ for geometry evaluation via fused evaluate+threshold+pack kernels.
 """
 
 import os
+import sys
 import platform
 import subprocess
-import numpy as np
 
 from setuptools import setup, Extension
-
-try:
-    from Cython.Build import cythonize
-    HAS_CYTHON = True
-except ImportError:
-    HAS_CYTHON = False
-    print("WARNING: Cython not found. Skipping extension build.")
 
 
 def get_openmp_flags():
@@ -57,8 +50,12 @@ def get_openmp_flags():
 
 
 def get_extensions():
-    """Build list of Cython extensions."""
-    if not HAS_CYTHON:
+    """Build list of Cython extensions. Returns [] if deps missing."""
+    try:
+        import numpy as np
+        from Cython.Build import cythonize
+    except ImportError as e:
+        print(f"WARNING: {e}. Skipping Cython extension build.")
         return []
 
     omp = get_openmp_flags()
@@ -84,7 +81,10 @@ def get_extensions():
     )
 
 
-if __name__ == '__main__':
-    setup(
-        ext_modules=get_extensions(),
-    )
+# Only build extensions when explicitly requested (build_ext),
+# not during pip install metadata discovery
+ext_modules = []
+if 'build_ext' in sys.argv:
+    ext_modules = get_extensions()
+
+setup(ext_modules=ext_modules)
