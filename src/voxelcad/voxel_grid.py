@@ -33,6 +33,19 @@ class VoxelGrid:
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals(),exit=False)
         self.res_vector  = np.ceil(sv/vsv).astype('uint')
 
+    def same_grid(self, other):
+        """Check if another VoxelGrid has identical geometry.
+
+        Returns True when origin, voxel_size, and resolution all match,
+        meaning packed voxel_data arrays are directly compatible for
+        byte-level boolean operations.
+        """
+        return (np.array_equal(self.res_vector, other.res_vector) and
+                np.allclose(self.xlim, other.xlim) and
+                np.allclose(self.ylim, other.ylim) and
+                np.allclose(self.zlim, other.zlim) and
+                np.allclose(self.voxel_size_vector, other.voxel_size_vector))
+
     def compute_size_vector(self):
         x0,x1 = self.xlim; y0,y1 = self.ylim; z0,z1 = self.zlim
         return np.array((x1-x0,y1-y0,z1-z0))

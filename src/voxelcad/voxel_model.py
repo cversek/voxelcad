@@ -406,7 +406,22 @@ class VoxelModel:
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         return VoxelModel(grid=new_grid,voxel_data=Vt)
 
+    def _ensure_rendered(self):
+        """Ensure voxel_data is populated (render if needed)."""
+        if self.voxel_data is None:
+            self.render_volume()
+
+    def _same_grid_op(self, other, np_op):
+        """Fast-path byte-level boolean op for same-grid operands."""
+        self._ensure_rendered()
+        other._ensure_rendered()
+        packed = np_op(self.voxel_data, other.voxel_data)
+        return VoxelModel(grid=self.grid, voxel_data=packed,
+                          _voxel_shape=self._voxel_shape)
+
     def __or__(self, other): #union
+        if self.grid.same_grid(other.grid):
+            return self._same_grid_op(other, np.bitwise_or)
         bounding_grid = self.grid | other.grid
         rx, ry, rz = bounding_grid.res_vector
         V = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
@@ -417,6 +432,8 @@ class VoxelModel:
         return VoxelModel(grid=bounding_grid,voxel_data=V)
 
     def __and__(self, other): #intersection
+        if self.grid.same_grid(other.grid):
+            return self._same_grid_op(other, np.bitwise_and)
         bounding_grid = self.grid & other.grid
         rx, ry, rz = bounding_grid.res_vector
         V = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
@@ -426,6 +443,8 @@ class VoxelModel:
         return VoxelModel(grid=bounding_grid,voxel_data=V)
 
     def __xor__(self, other): #exclusive or
+        if self.grid.same_grid(other.grid):
+            return self._same_grid_op(other, np.bitwise_xor)
         bounding_grid = self.grid | other.grid
         rx, ry, rz = bounding_grid.res_vector
         V = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
@@ -436,12 +455,25 @@ class VoxelModel:
         return VoxelModel(grid=bounding_grid,voxel_data=V)
 
     def __sub__(self, other): #difference
+        if self.grid.same_grid(other.grid):
+            self._ensure_rendered()
+            other._ensure_rendered()
+            packed = np.bitwise_and(self.voxel_data,
+                                    np.bitwise_not(other.voxel_data))
+            return VoxelModel(grid=self.grid, voxel_data=packed,
+                              _voxel_shape=self._voxel_shape)
         rx, ry, rz = self.grid.res_vector
         V = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
         for X_2d, Y_2d, z_val, k in self.grid.iter_slices():
             V[:, :, k]  =  self._get_slice_for_coords(X_2d, Y_2d, z_val)
             V[:, :, k] &= ~other._get_slice_for_coords(X_2d, Y_2d, z_val)
         return VoxelModel(grid=self.grid,voxel_data=V)
+
+    def __invert__(self): #bitwise NOT
+        self._ensure_rendered()
+        packed = np.bitwise_not(self.voxel_data)
+        return VoxelModel(grid=self.grid, voxel_data=packed,
+                          _voxel_shape=self._voxel_shape)
 
 def union_all(models):
     u = models[0]
