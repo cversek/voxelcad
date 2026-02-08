@@ -52,10 +52,10 @@ def _get_optimal_threads(int rz):
 # Bit-packing helpers
 # ---------------------------------------------------------------------------
 
-cdef inline void set_bit(unsigned char *packed, int lin_idx) noexcept nogil:
+cdef inline void set_bit(unsigned char *packed, long long lin_idx) noexcept nogil:
     """Set a bit in packed array (MSB-first, matching np.packbits)."""
-    cdef int byte_idx = lin_idx >> 3
-    cdef int bit_pos = 7 - (lin_idx & 7)
+    cdef long long byte_idx = lin_idx >> 3
+    cdef int bit_pos = 7 - <int>(lin_idx & 7)
     packed[byte_idx] = packed[byte_idx] | <unsigned char>(1 << bit_pos)
 
 
@@ -83,17 +83,19 @@ def evaluate_and_pack_cube(
     cdef int rx = xcc.shape[0]
     cdef int ry = ycc.shape[0]
     cdef int rz = zcc.shape[0]
-    cdef int total_bits = rx * ry * rz
-    cdef int total_bytes = (total_bits + 7) >> 3
-    cdef int slice_bits = rx * ry
+    cdef long long total_bits = <long long>rx * <long long>ry * <long long>rz
+    cdef long long total_bytes = (total_bits + 7) >> 3
+    cdef long long slice_bits = <long long>rx * <long long>ry
 
     packed = np.zeros(total_bytes, dtype=np.uint8)
     cdef unsigned char[::1] out_view = packed
     cdef unsigned char *out = &out_view[0]
 
-    cdef int i, j, k, lin_idx
+    cdef int i, j, k
+    cdef long long lin_idx
     cdef double x, y, z
     cdef int actual_threads
+    cdef long long _slice_bits_check
 
     if n_threads <= 0:
         n_threads = _get_optimal_threads(rz)
@@ -137,17 +139,19 @@ def evaluate_and_pack_sphere(
     cdef int rx = xcc.shape[0]
     cdef int ry = ycc.shape[0]
     cdef int rz = zcc.shape[0]
-    cdef int total_bits = rx * ry * rz
-    cdef int total_bytes = (total_bits + 7) >> 3
-    cdef int slice_bits = rx * ry
+    cdef long long total_bits = <long long>rx * <long long>ry * <long long>rz
+    cdef long long total_bytes = (total_bits + 7) >> 3
+    cdef long long slice_bits = <long long>rx * <long long>ry
 
     packed = np.zeros(total_bytes, dtype=np.uint8)
     cdef unsigned char[::1] out_view = packed
     cdef unsigned char *out = &out_view[0]
 
-    cdef int i, j, k, lin_idx
+    cdef int i, j, k
+    cdef long long lin_idx
     cdef double dx, dy, dz, dz_sq, dy_sq
     cdef int actual_threads
+    cdef long long _slice_bits_check
 
     if n_threads <= 0:
         n_threads = _get_optimal_threads(rz)
@@ -193,17 +197,19 @@ def evaluate_and_pack_cylinder(
     cdef int rx = xcc.shape[0]
     cdef int ry = ycc.shape[0]
     cdef int rz = zcc.shape[0]
-    cdef int total_bits = rx * ry * rz
-    cdef int total_bytes = (total_bits + 7) >> 3
-    cdef int slice_bits = rx * ry
+    cdef long long total_bits = <long long>rx * <long long>ry * <long long>rz
+    cdef long long total_bytes = (total_bits + 7) >> 3
+    cdef long long slice_bits = <long long>rx * <long long>ry
 
     packed = np.zeros(total_bytes, dtype=np.uint8)
     cdef unsigned char[::1] out_view = packed
     cdef unsigned char *out = &out_view[0]
 
-    cdef int i, j, k, lin_idx
+    cdef int i, j, k
+    cdef long long lin_idx
     cdef double dx, dy, Zc, Pz, R, R_sq, dist_sq
     cdef int actual_threads
+    cdef long long _slice_bits_check
 
     if n_threads <= 0:
         n_threads = _get_optimal_threads(rz)
@@ -259,9 +265,9 @@ def evaluate_and_pack_gyroid(
     cdef int rx = xcc.shape[0]
     cdef int ry = ycc.shape[0]
     cdef int rz = zcc.shape[0]
-    cdef int total_bits = rx * ry * rz
-    cdef int total_bytes = (total_bits + 7) >> 3
-    cdef int slice_bits = rx * ry
+    cdef long long total_bits = <long long>rx * <long long>ry * <long long>rz
+    cdef long long total_bytes = (total_bits + 7) >> 3
+    cdef long long slice_bits = <long long>rx * <long long>ry
 
     packed = np.zeros(total_bytes, dtype=np.uint8)
     cdef unsigned char[::1] out_view = packed
@@ -278,10 +284,12 @@ def evaluate_and_pack_gyroid(
     cdef double[::1] cos_y = cos_y_arr
     cdef double[::1] sin_y = sin_y_arr
 
-    cdef int i, j, k, lin_idx
+    cdef int i, j, k
+    cdef long long lin_idx
     cdef double Xa, Ya, cos_z, sin_z, F
     cdef double lo, hi
     cdef int actual_threads
+    cdef long long _slice_bits_check
 
     # Precompute X-axis trig
     for i in range(rx):
@@ -352,9 +360,9 @@ def evaluate_and_pack_wiggly_gyroid(
     cdef int rx = xcc.shape[0]
     cdef int ry = ycc.shape[0]
     cdef int rz = zcc.shape[0]
-    cdef int total_bits = rx * ry * rz
-    cdef int total_bytes = (total_bits + 7) >> 3
-    cdef int slice_bits = rx * ry
+    cdef long long total_bits = <long long>rx * <long long>ry * <long long>rz
+    cdef long long total_bytes = (total_bits + 7) >> 3
+    cdef long long slice_bits = <long long>rx * <long long>ry
 
     packed = np.zeros(total_bytes, dtype=np.uint8)
     cdef unsigned char[::1] out_view = packed
@@ -381,7 +389,8 @@ def evaluate_and_pack_wiggly_gyroid(
     cdef double[::1] cos_by = cos_by_arr, sin_by = sin_by_arr
     cdef double[::1] ya_v = ya_arr
 
-    cdef int i, j, k, lin_idx
+    cdef int i, j, k
+    cdef long long lin_idx
     cdef double Xa, Ya, Za, bX, bY, bZ
     cdef double cosX, sinX, cosY, sinY, cosZ, sinZ
     cdef double cos_bZ, sin_bZ
@@ -391,6 +400,7 @@ def evaluate_and_pack_wiggly_gyroid(
     cdef double Fw1, Fw2
     cdef int inside
     cdef int actual_threads
+    cdef long long _slice_bits_check
 
     # Precompute X-axis
     for i in range(rx):
@@ -491,9 +501,9 @@ def evaluate_and_pack_hyperwiggly_gyroid(
     cdef int rx = xcc.shape[0]
     cdef int ry = ycc.shape[0]
     cdef int rz = zcc.shape[0]
-    cdef int total_bits = rx * ry * rz
-    cdef int total_bytes = (total_bits + 7) >> 3
-    cdef int slice_bits = rx * ry
+    cdef long long total_bits = <long long>rx * <long long>ry * <long long>rz
+    cdef long long total_bytes = (total_bits + 7) >> 3
+    cdef long long slice_bits = <long long>rx * <long long>ry
 
     packed = np.zeros(total_bytes, dtype=np.uint8)
     cdef unsigned char[::1] out_view = packed
@@ -526,7 +536,8 @@ def evaluate_and_pack_hyperwiggly_gyroid(
     cdef double[::1] cos_3by = cos_3by_arr, sin_3by = sin_3by_arr
     cdef double[::1] ya_v = ya_arr
 
-    cdef int i, j, k, lin_idx
+    cdef int i, j, k
+    cdef long long lin_idx
     cdef double Xa, Ya, Za, bX, bY, bZ
     cdef double cosX, sinX, cosY, sinY, cosZ, sinZ
     cdef double cos_bZ, sin_bZ, cos_3bZ, sin_3bZ
@@ -536,6 +547,7 @@ def evaluate_and_pack_hyperwiggly_gyroid(
     cdef double Fw1, Fw2
     cdef int inside
     cdef int actual_threads
+    cdef long long _slice_bits_check
     cdef double half_amp = 0.5 * w_amp
     cdef int p1 = w_expon + 1
 
