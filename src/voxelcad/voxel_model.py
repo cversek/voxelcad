@@ -308,16 +308,16 @@ class VoxelModel:
         return I,J,K
 
     def translate(self, v):
-        if self.voxel_data is None:
-            self.render_volume()
+        v = np.asarray(v, dtype='float64')
+        M4 = np.eye(4)
+        M4[:3, 3] = v
+        M4inv = np.eye(4)
+        M4inv[:3, 3] = -v
         new_grid = VoxelGrid(xlim=self.grid.xlim + v[0],
                              ylim=self.grid.ylim + v[1],
                              zlim=self.grid.zlim + v[2],
-                             voxel_size=self.grid.voxel_size_vector,
-                             )
-        vm = VoxelModel(grid=new_grid,voxel_data=self.voxel_data,_voxel_shape=self._voxel_shape)
-        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
-        return vm
+                             voxel_size=self.grid.voxel_size_vector)
+        return TransformedModel(self, M4, M4inv, new_grid)
 
     def rotate_x(self, degrees, **kwargs):
         return self.rotate([1.0,0,0], degrees, **kwargs)
@@ -353,9 +353,7 @@ class VoxelModel:
             return (R,Rinv)
         else:
             m = self.apply_transformation(R,Rinv)
-            LOGGER.debug(f"rotate: m._voxel_shape: {m._voxel_shape}")
-            LOGGER.debug(f"\tm.packed_bytes: {m.voxel_data.nbytes}")
-            LOGGER.debug(f"\tm.grid: {m.grid!r}")
+            LOGGER.debug(f"rotate: type={type(m).__name__}, grid={m.grid!r}")
             return m
 
     def scale(self, v):
@@ -363,48 +361,29 @@ class VoxelModel:
         S    = np.array(((v[0],0,0),(0,v[1],0),(0,0,v[2])))
         Sinv = np.array(((1.0/v[0],0,0),(0,1.0/v[1],0),(0,0,1.0/v[2])))
         m = self.apply_transformation(S,Sinv)
-        LOGGER.debug(f"scale: m._voxel_shape: {m._voxel_shape}")
-        LOGGER.debug(f"\tm.packed_bytes: {m.voxel_data.nbytes}")
-        LOGGER.debug(f"\tm.grid: {m.grid!r}")
+        LOGGER.debug(f"scale: type={type(m).__name__}, grid={m.grid!r}")
         return m
 
     def apply_transformation(self, M, Minv):
-        C  = self.grid.compute_box_corner_vectors()
-        Ct = np.dot(C,M.T)
-        x0,x1 = xlim = (Ct[:,0].min(),Ct[:,0].max())
-        y0,y1 = ylim = (Ct[:,1].min(),Ct[:,1].max())
-        z0,z1 = zlim = (Ct[:,2].min(),Ct[:,2].max())
-        new_grid = VoxelGrid(xlim,ylim,zlim,voxel_size=self.grid.voxel_size_vector)
-        # Use streaming: iterate Z-slices of new grid, apply inverse transform,
-        # then look up each point in original volume.
-        # Note: Z_orig varies per-pixel so evaluate_slice() can't be used here.
-        # Unpack the source volume once (or render it if needed), then index per-slice.
-        if self.voxel_data is None:
-            self.render_volume()
-        V_src = self._unpack_volume()
-        src_rx, src_ry, src_rz = self.grid.res_vector
-        sx0, sx1 = self.grid.xlim
-        sy0, sy1 = self.grid.ylim
-        sz0, sz1 = self.grid.zlim
-        rx, ry, rz = new_grid.res_vector
-        Vt = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
-        for X_2d, Y_2d, z_val, k in new_grid.iter_slices():
-            Z_2d = np.full_like(X_2d, z_val)
-            X_orig = Minv[0,0]*X_2d + Minv[0,1]*Y_2d + Minv[0,2]*Z_2d
-            Y_orig = Minv[1,0]*X_2d + Minv[1,1]*Y_2d + Minv[1,2]*Z_2d
-            Z_orig = Minv[2,0]*X_2d + Minv[2,1]*Y_2d + Minv[2,2]*Z_2d
-            # Map to source volume indices
-            I = np.floor(src_rx * (X_orig - sx0) / (sx1 - sx0)).astype('int')
-            J = np.floor(src_ry * (Y_orig - sy0) / (sy1 - sy0)).astype('int')
-            K = np.floor(src_rz * (Z_orig - sz0) / (sz1 - sz0)).astype('int')
-            valid = (I >= 0) & (I < src_rx) & (J >= 0) & (J < src_ry) & (K >= 0) & (K < src_rz)
-            I_safe = np.where(valid, I, 0)
-            J_safe = np.where(valid, J, 0)
-            K_safe = np.where(valid, K, 0)
-            Vt[:, :, k] = np.where(valid, V_src[I_safe, J_safe, K_safe], False)
-        del V_src
-        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
-        return VoxelModel(grid=new_grid,voxel_data=Vt)
+        """Return a lazy TransformedModel (deferred materialization).
+
+        Args:
+            M: 3x3 forward transform matrix
+            Minv: 3x3 inverse transform matrix
+        """
+        # Embed 3x3 into 4x4 homogeneous
+        M4 = np.eye(4)
+        M4[:3, :3] = M
+        M4inv = np.eye(4)
+        M4inv[:3, :3] = Minv
+        C = self.grid.compute_box_corner_vectors()
+        Ct = np.dot(C, M.T)
+        xlim = (Ct[:,0].min(), Ct[:,0].max())
+        ylim = (Ct[:,1].min(), Ct[:,1].max())
+        zlim = (Ct[:,2].min(), Ct[:,2].max())
+        new_grid = VoxelGrid(xlim, ylim, zlim,
+                             voxel_size=self.grid.voxel_size_vector)
+        return TransformedModel(self, M4, M4inv, new_grid)
 
     def _ensure_rendered(self):
         """Ensure voxel_data is populated (render if needed)."""
@@ -420,60 +399,139 @@ class VoxelModel:
                           _voxel_shape=self._voxel_shape)
 
     def __or__(self, other): #union
-        if self.grid.same_grid(other.grid):
+        if (self.voxel_data is not None and other.voxel_data is not None
+                and self.grid.same_grid(other.grid)):
             return self._same_grid_op(other, np.bitwise_or)
         bounding_grid = self.grid | other.grid
-        rx, ry, rz = bounding_grid.res_vector
-        V = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
-        for X_2d, Y_2d, z_val, k in bounding_grid.iter_slices():
-            V[:, :, k]  = self._get_slice_for_coords(X_2d, Y_2d, z_val)
-            V[:, :, k] |= other._get_slice_for_coords(X_2d, Y_2d, z_val)
-        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
-        return VoxelModel(grid=bounding_grid,voxel_data=V)
+        return CSGModel(self, 'or', other, bounding_grid)
 
     def __and__(self, other): #intersection
-        if self.grid.same_grid(other.grid):
+        if (self.voxel_data is not None and other.voxel_data is not None
+                and self.grid.same_grid(other.grid)):
             return self._same_grid_op(other, np.bitwise_and)
         bounding_grid = self.grid & other.grid
-        rx, ry, rz = bounding_grid.res_vector
-        V = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
-        for X_2d, Y_2d, z_val, k in bounding_grid.iter_slices():
-            V[:, :, k]  = self._get_slice_for_coords(X_2d, Y_2d, z_val)
-            V[:, :, k] &= other._get_slice_for_coords(X_2d, Y_2d, z_val)
-        return VoxelModel(grid=bounding_grid,voxel_data=V)
+        return CSGModel(self, 'and', other, bounding_grid)
 
     def __xor__(self, other): #exclusive or
-        if self.grid.same_grid(other.grid):
+        if (self.voxel_data is not None and other.voxel_data is not None
+                and self.grid.same_grid(other.grid)):
             return self._same_grid_op(other, np.bitwise_xor)
         bounding_grid = self.grid | other.grid
-        rx, ry, rz = bounding_grid.res_vector
-        V = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
-        for X_2d, Y_2d, z_val, k in bounding_grid.iter_slices():
-            V[:, :, k]  = self._get_slice_for_coords(X_2d, Y_2d, z_val)
-            V[:, :, k] ^= other._get_slice_for_coords(X_2d, Y_2d, z_val)
-        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
-        return VoxelModel(grid=bounding_grid,voxel_data=V)
+        return CSGModel(self, 'xor', other, bounding_grid)
 
     def __sub__(self, other): #difference
-        if self.grid.same_grid(other.grid):
-            self._ensure_rendered()
-            other._ensure_rendered()
+        if (self.voxel_data is not None and other.voxel_data is not None
+                and self.grid.same_grid(other.grid)):
             packed = np.bitwise_and(self.voxel_data,
                                     np.bitwise_not(other.voxel_data))
             return VoxelModel(grid=self.grid, voxel_data=packed,
                               _voxel_shape=self._voxel_shape)
-        rx, ry, rz = self.grid.res_vector
-        V = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
-        for X_2d, Y_2d, z_val, k in self.grid.iter_slices():
-            V[:, :, k]  =  self._get_slice_for_coords(X_2d, Y_2d, z_val)
-            V[:, :, k] &= ~other._get_slice_for_coords(X_2d, Y_2d, z_val)
-        return VoxelModel(grid=self.grid,voxel_data=V)
+        return CSGModel(self, 'sub', other, self.grid)
 
     def __invert__(self): #bitwise NOT
         self._ensure_rendered()
         packed = np.bitwise_not(self.voxel_data)
         return VoxelModel(grid=self.grid, voxel_data=packed,
                           _voxel_shape=self._voxel_shape)
+
+class CSGModel(VoxelModel):
+    """Lazy boolean combination — defers materialization until consumption.
+
+    Stores operand references and operation type without allocating
+    intermediate volumes. evaluate_slice() evaluates both children
+    per-slice and combines on the fly.
+    """
+    _OP_MAP = {
+        'or':  lambda L, R: L | R,
+        'and': lambda L, R: L & R,
+        'xor': lambda L, R: L ^ R,
+        'sub': lambda L, R: L & ~R,
+    }
+
+    def __init__(self, left, op, right, grid):
+        super().__init__(grid=grid)
+        self.left = left
+        self.op = op
+        self.right = right
+
+    def evaluate_slice(self, X_2d, Y_2d, z_val):
+        L = self.left._get_slice_for_coords(X_2d, Y_2d, z_val)
+        R = self.right._get_slice_for_coords(X_2d, Y_2d, z_val)
+        return self._OP_MAP[self.op](L, R)
+
+
+class TransformedModel(VoxelModel):
+    """Lazy affine transform — defers materialization until consumption.
+
+    Uses 4x4 homogeneous matrices for full affine transforms (rotation,
+    scale, translation, and arbitrary compositions). Chained transforms
+    compose into a single matrix pair.
+    """
+
+    def __init__(self, source, M4, M4inv, grid):
+        super().__init__(grid=grid)
+        self.source = source
+        self.M4 = M4        # 4x4 forward transform
+        self.M4inv = M4inv  # 4x4 inverse transform
+
+    def evaluate_slice(self, X_2d, Y_2d, z_val):
+        """Evaluate by inverse-transforming coordinates into source space."""
+        if self.source.voxel_data is None:
+            self.source.render_volume()
+        V_src = self.source._unpack_volume()
+        src_rx, src_ry, src_rz = self.source.grid.res_vector
+        sx0, sx1 = self.source.grid.xlim
+        sy0, sy1 = self.source.grid.ylim
+        sz0, sz1 = self.source.grid.zlim
+        Minv = self.M4inv
+        Z_2d = np.full_like(X_2d, z_val)
+        # Affine inverse: includes translation
+        X_orig = Minv[0,0]*X_2d + Minv[0,1]*Y_2d + Minv[0,2]*Z_2d + Minv[0,3]
+        Y_orig = Minv[1,0]*X_2d + Minv[1,1]*Y_2d + Minv[1,2]*Z_2d + Minv[1,3]
+        Z_orig = Minv[2,0]*X_2d + Minv[2,1]*Y_2d + Minv[2,2]*Z_2d + Minv[2,3]
+        I = np.floor(src_rx * (X_orig - sx0) / (sx1 - sx0)).astype('int')
+        J = np.floor(src_ry * (Y_orig - sy0) / (sy1 - sy0)).astype('int')
+        K = np.floor(src_rz * (Z_orig - sz0) / (sz1 - sz0)).astype('int')
+        valid = (I >= 0) & (I < src_rx) & (J >= 0) & (J < src_ry) & (K >= 0) & (K < src_rz)
+        I_safe = np.where(valid, I, 0)
+        J_safe = np.where(valid, J, 0)
+        K_safe = np.where(valid, K, 0)
+        return np.where(valid, V_src[I_safe, J_safe, K_safe], False)
+
+    def _transform_corners(self, source, M4):
+        """Compute new bounding grid from transformed source corners."""
+        C = source.grid.compute_box_corner_vectors()
+        # Apply 4x4 to homogeneous coordinates
+        Ch = np.hstack([C, np.ones((C.shape[0], 1))])
+        Ct = (M4 @ Ch.T).T[:, :3]
+        xlim = (Ct[:,0].min(), Ct[:,0].max())
+        ylim = (Ct[:,1].min(), Ct[:,1].max())
+        zlim = (Ct[:,2].min(), Ct[:,2].max())
+        return VoxelGrid(xlim, ylim, zlim,
+                         voxel_size=source.grid.voxel_size_vector)
+
+    def apply_transformation(self, M, Minv):
+        """Compose: convert 3x3 to 4x4, then compose with existing."""
+        M4_new = np.eye(4)
+        M4_new[:3, :3] = M
+        M4inv_new = np.eye(4)
+        M4inv_new[:3, :3] = Minv
+        composed_M4 = M4_new @ self.M4
+        composed_M4inv = self.M4inv @ M4inv_new
+        new_grid = self._transform_corners(self.source, composed_M4)
+        return TransformedModel(self.source, composed_M4, composed_M4inv, new_grid)
+
+    def translate(self, v):
+        """Compose translation into the transform chain."""
+        T = np.eye(4)
+        T[:3, 3] = v
+        Tinv = np.eye(4)
+        Tinv[:3, 3] = -np.array(v)
+        composed_M4 = T @ self.M4
+        composed_M4inv = self.M4inv @ Tinv
+        new_grid = self._transform_corners(self.source, composed_M4)
+        return TransformedModel(self.source, composed_M4, composed_M4inv, new_grid)
+
 
 def union_all(models):
     u = models[0]
