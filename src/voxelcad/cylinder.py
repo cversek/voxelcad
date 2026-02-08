@@ -2,8 +2,9 @@ import numpy as np
 
 from voxelcad.voxel_model import VoxelModel
 from voxelcad.voxel_grid  import VoxelGrid
+from voxelcad._kernels import CYTHON_AVAILABLE, evaluate_and_pack_cylinder
 
-from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED
+from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED, TIMING_START, TIMING_END
 
 class Cylinder(VoxelModel):
     def __init__(self,h,r=None, r1=None, r2=None, center=False, voxel_size=None, **kwargs):
@@ -53,6 +54,20 @@ class Cylinder(VoxelModel):
         R = r1*(1.0-Pz) + r2*Pz
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         return (Xc**2 + Yc**2 <= R**2) & ((0.0 <= Pz) & (Pz <= 1.0))
+
+    def render_volume(self):
+        if not CYTHON_AVAILABLE:
+            return super().render_volume()
+        TIMING_START("render_volume")
+        xcc, ycc, zcc = self.grid.compute_cell_center_ranges()
+        cx, cy, cz = self.grid.compute_center_vector()
+        self.voxel_data = evaluate_and_pack_cylinder(
+            xcc, ycc, zcc, cx, cy, cz,
+            self.h, self.r1, self.r2,
+        )
+        self._voxel_shape = (len(xcc), len(ycc), len(zcc))
+        TIMING_END("render_volume")
+        return self.voxel_data
 
 ################################################################################
 # TEST CODE

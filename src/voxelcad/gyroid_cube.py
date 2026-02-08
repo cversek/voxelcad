@@ -1,7 +1,13 @@
 import numpy as np
 from numpy import sin, cos, tan, pi
 
-from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED
+from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED, TIMING_START, TIMING_END
+from voxelcad._kernels import (
+    CYTHON_AVAILABLE,
+    evaluate_and_pack_gyroid,
+    evaluate_and_pack_wiggly_gyroid,
+    evaluate_and_pack_hyperwiggly_gyroid,
+)
 
 from voxelcad.cube import Cube
 
@@ -40,6 +46,28 @@ class GyroidCube(Cube):
         V &= super().evaluate_slice(X_2d, Y_2d, z_val)
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         return V
+
+    def render_volume(self):
+        if not CYTHON_AVAILABLE:
+            return super().render_volume()
+        TIMING_START("render_volume")
+        xcc, ycc, zcc = self.grid.compute_cell_center_ranges()
+        cx, cy, cz = self.grid.compute_center_vector()
+        sx, sy, sz = self.size
+        a = pi * self.lattice_param
+        self.voxel_data = evaluate_and_pack_gyroid(
+            xcc, ycc, zcc, cx, cy, cz,
+            sx / 2.0, sy / 2.0, sz / 2.0,
+            a[0], a[1], a[2],
+            self.phi[0], self.phi[1], self.phi[2],
+            self.structure_param,
+            self.thresh1 if self.thresh1 is not None else 0.0,
+            self.thresh2 if self.thresh2 is not None else 0.0,
+            1 if (self.thresh1 is not None and self.thresh2 is not None) else 0,
+        )
+        self._voxel_shape = (len(xcc), len(ycc), len(zcc))
+        TIMING_END("render_volume")
+        return self.voxel_data
 
 class WigglyGyroidCube(GyroidCube):
     def __init__(self, size,
@@ -81,6 +109,26 @@ class WigglyGyroidCube(GyroidCube):
         V &= Cube.evaluate_slice(self, X_2d, Y_2d, z_val)
         return V
 
+    def render_volume(self):
+        if not CYTHON_AVAILABLE:
+            return super().render_volume()
+        TIMING_START("render_volume")
+        xcc, ycc, zcc = self.grid.compute_cell_center_ranges()
+        cx, cy, cz = self.grid.compute_center_vector()
+        sx, sy, sz = self.size
+        a = pi * self.lattice_param
+        self.voxel_data = evaluate_and_pack_wiggly_gyroid(
+            xcc, ycc, zcc, cx, cy, cz,
+            sx / 2.0, sy / 2.0, sz / 2.0,
+            a[0], a[1], a[2],
+            self.phi[0], self.phi[1], self.phi[2],
+            self.structure_param, self.thresh1, self.thresh2,
+            self.w_freq, self.w_amp, self.w_expon,
+        )
+        self._voxel_shape = (len(xcc), len(ycc), len(zcc))
+        TIMING_END("render_volume")
+        return self.voxel_data
+
 
 class HyperWigglyGyroidCube(GyroidCube):
     def __init__(self, size,
@@ -121,6 +169,26 @@ class HyperWigglyGyroidCube(GyroidCube):
         # intersect with cube bounds
         V &= Cube.evaluate_slice(self, X_2d, Y_2d, z_val)
         return V
+
+    def render_volume(self):
+        if not CYTHON_AVAILABLE:
+            return super().render_volume()
+        TIMING_START("render_volume")
+        xcc, ycc, zcc = self.grid.compute_cell_center_ranges()
+        cx, cy, cz = self.grid.compute_center_vector()
+        sx, sy, sz = self.size
+        a = pi * self.lattice_param
+        self.voxel_data = evaluate_and_pack_hyperwiggly_gyroid(
+            xcc, ycc, zcc, cx, cy, cz,
+            sx / 2.0, sy / 2.0, sz / 2.0,
+            a[0], a[1], a[2],
+            self.phi[0], self.phi[1], self.phi[2],
+            self.structure_param, self.thresh1, self.thresh2,
+            self.w_freq, self.w_amp, self.w_expon,
+        )
+        self._voxel_shape = (len(xcc), len(ycc), len(zcc))
+        TIMING_END("render_volume")
+        return self.voxel_data
 
 ################################################################################
 # TEST CODE
