@@ -24,7 +24,7 @@ from benchmarks.benchmark_boolean import (
     BenchmarkCSGUnionRender, BenchmarkCSGDepth4Render,
 )
 from benchmarks.benchmark_fallback_breaking import (
-    BenchmarkManualComposition, BenchmarkSameGridInCSG,
+    BenchmarkManualComposition, BenchmarkTier2CompatibleGrid,
     BenchmarkTransformedInCSG, BenchmarkTransformOverhead,
 )
 
@@ -41,7 +41,7 @@ ALL_BENCHMARKS = [
     BenchmarkCSGDepth4Render,
     # Fallback-breaking
     BenchmarkManualComposition,
-    BenchmarkSameGridInCSG,
+    BenchmarkTier2CompatibleGrid,
     BenchmarkTransformedInCSG,
     BenchmarkTransformOverhead,
 ]

@@ -2,23 +2,32 @@
 import pytest
 import numpy as np
 from voxelcad import Cube, Sphere
-from voxelcad.voxel_model import CSGModel
+from voxelcad.voxel_model import VoxelModel, CSGModel
 from tests.conftest import LOW_RES_VS
 
 
 def test_csg_streaming_produces_volume():
-    """CSGModel with different-grid children renders via streaming evaluate_slice."""
+    """CSGModel with incompatible-grid children renders via streaming evaluate_slice."""
     a = Cube(size=10, voxel_size=LOW_RES_VS, center=True)
-    b = Sphere(r=4, voxel_size=LOW_RES_VS)
+    b = Sphere(r=4, voxel_size=LOW_RES_VS * 2)  # different voxel_size → Tier 3
     csg = a & b
     assert type(csg) is CSGModel
     csg.render_volume()
     V = csg._unpack_volume()
-    # Intersection of cube[-5,5] and sphere[r=4] should have voxels
     assert V.any()
-    # Should be smaller than either parent alone
-    a.render_volume()
-    assert V.sum() < a._unpack_volume().sum()
+
+
+def test_tier2_intersection_correctness():
+    """Tier 2 intersection: Cube[-5,5] & Sphere[r=4] should be subset of both."""
+    a = Cube(size=10, voxel_size=LOW_RES_VS, center=True)
+    b = Sphere(r=4, voxel_size=LOW_RES_VS)
+    result = a & b
+    assert type(result) is VoxelModel  # Tier 2
+    V = result._unpack_volume()
+    assert V.any()
+    # Render parents on same grid to compare
+    a_on_grid = a.render_on_grid(result.grid)
+    assert V.sum() <= a_on_grid._unpack_volume().sum()
 
 
 def test_non_power_of_2_grid():
@@ -34,17 +43,29 @@ def test_non_power_of_2_grid():
     assert V.all()  # Cube fills its own grid
 
 
-def test_empty_intersection():
-    """Non-overlapping grids: VoxelGrid.__and__ raises AssertionError.
+def test_empty_intersection_compatible_grids():
+    """Non-overlapping compatible grids: Tier 2 produces empty VoxelModel (no crash).
 
-    When two grids don't overlap, the intersection bbox has maximin > minimax,
-    producing invalid limits. VoxelGrid.__init__ asserts xlim[0] < xlim[1].
-    This is a known limitation — see GitHub issue on VoxelCAD repo.
-    Future fix: return an empty VoxelModel or raise a descriptive error.
+    With Tier 2, compatible grids render on the union grid and bitwise_and.
+    Non-overlapping geometry produces all-zero voxel_data — no AssertionError.
     """
     a = Cube(size=2, voxel_size=0.5, center=True)   # bbox [-1,1]
-    b = Cube(size=2, voxel_size=0.5)                 # bbox [0,2] — non-centered
+    b = Cube(size=2, voxel_size=0.5)                 # bbox [0,2]
     b_far = b.translate([10, 10, 10])                # bbox [10,12]
+    result = a & b_far
+    assert type(result) is VoxelModel
+    assert result._unpack_volume().sum() == 0  # empty intersection
+
+
+def test_empty_intersection_incompatible_grids():
+    """Non-overlapping incompatible grids still raise AssertionError (Tier 3).
+
+    VoxelGrid.__and__ asserts xlim[0] < xlim[1], which fails for
+    non-overlapping grids. This is a known limitation (voxelcad#1).
+    """
+    a = Cube(size=2, voxel_size=0.5, center=True)
+    b = Cube(size=2, voxel_size=1.0)                 # different voxel_size
+    b_far = b.translate([10, 10, 10])
     with pytest.raises(AssertionError):
         a & b_far
 

@@ -1,8 +1,8 @@
-"""Benchmark: fallback-breaking scenarios that expose non-composability.
+"""Benchmark: fallback-breaking scenarios and Tier 2 gap closure.
 
-These benchmarks measure the gap between what the optimizer COULD do
-(manual composition baseline) and what it actually does (CSGModel fallback).
-Phase 10 should close these gaps.
+Phase 9 showed a 19-35x gap between manual composition and CSG path
+for compatible-grid operands. Phase 10.1 Tier 2 closes this gap.
+These benchmarks measure both the closed gap and remaining CSG overhead.
 """
 import numpy as np
 from super_utils.benchmarks import BenchmarkBase
@@ -39,34 +39,30 @@ class BenchmarkManualComposition(BenchmarkBase):
         return self.result is not None and self.result.sum() > 0
 
 
-class BenchmarkSameGridInCSG(BenchmarkBase):
-    """Same-grid primitives forced through CSG path (different bbox)."""
-    name = "same_grid_in_csg"
-    description = "(Sphere & GyroidCube).render_volume() — same voxel_size, CSG path"
+class BenchmarkTier2CompatibleGrid(BenchmarkBase):
+    """Tier 2: compatible-grid intersection (was 19-35x gap, now closed)."""
+    name = "tier2_compatible_grid"
+    description = "(Sphere & GyroidCube) — Tier 2 compatible grid path"
     workload_type = "mixed"
 
     def setup(self):
         res = RESOLUTIONS[self.size]
         vs = 10.0 / res
-        # Sphere(r=4) has bbox [-4,4], GyroidCube(size=10) has bbox [-5,5]
-        # Same voxel_size but different bbox → CSGModel (not fast path)
         self.a = Sphere(r=4, voxel_size=vs)
         self.b = GyroidCube(size=10, voxel_size=vs, center=True)
-        self.csg = self.a & self.b
-        assert type(self.csg) is CSGModel, "Expected CSGModel for different-bbox operands"
 
     def run(self):
-        self.csg.voxel_data = None
-        self.csg.render_volume()
+        self.result = self.a & self.b
 
     def validate(self):
-        return self.csg.voxel_data is not None
+        return (type(self.result) is VoxelModel and
+                self.result.voxel_data is not None)
 
 
 class BenchmarkTransformedInCSG(BenchmarkBase):
-    """TransformedModel in CSG tree — rotation forces source unpack."""
+    """TransformedModel in CSG tree — incompatible grids force Tier 3."""
     name = "transformed_in_csg"
-    description = "Cube.rotate(45) & Sphere — transform + CSG overhead"
+    description = "Cube.rotate(45) & Sphere(vs*2) — transform + CSG overhead"
     workload_type = "mixed"
 
     def setup(self):
@@ -74,8 +70,9 @@ class BenchmarkTransformedInCSG(BenchmarkBase):
         vs = 10.0 / res
         cube = Cube(size=10, voxel_size=vs, center=True)
         self.rotated = cube.rotate_z(45)
-        self.sphere = Sphere(r=4, voxel_size=vs)
+        self.sphere = Sphere(r=4, voxel_size=vs * 2)  # incompatible → Tier 3
         self.csg = self.rotated & self.sphere
+        assert type(self.csg) is CSGModel
 
     def run(self):
         self.csg.voxel_data = None

@@ -117,7 +117,10 @@ class VoxelModel:
 
         Iterates over Z-slices, calling evaluate_slice() for each,
         and accumulates into a pre-allocated 3D boolean array.
+        Returns existing data if already rendered.
         """
+        if self.voxel_data is not None:
+            return self.voxel_data
         if self.grid is None:
             self.construct_grid()
         TIMING_START("render_volume")
@@ -385,47 +388,92 @@ class VoxelModel:
                              voxel_size=self.grid.voxel_size_vector)
         return TransformedModel(self, M4, M4inv, new_grid)
 
+    def render_on_grid(self, target_grid):
+        """Evaluate this model's geometry on an arbitrary target grid.
+
+        Returns a new VoxelModel with packed data on target_grid.
+        Uses evaluate_slice() for primitives/CSG, or _get_slice_for_coords()
+        for coordinate remapping of packed data models.
+        """
+        if self.voxel_data is not None and self.grid.same_grid(target_grid):
+            return VoxelModel(grid=target_grid, voxel_data=self.voxel_data,
+                              _voxel_shape=self._voxel_shape)
+        rx, ry, rz = target_grid.res_vector
+        V = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
+        for X_2d, Y_2d, z_val, k in target_grid.iter_slices():
+            V[:, :, k] = self._get_slice_for_coords(X_2d, Y_2d, z_val)
+        return VoxelModel(grid=target_grid, voxel_data=V)
+
     def _ensure_rendered(self):
         """Ensure voxel_data is populated (render if needed)."""
         if self.voxel_data is None:
             self.render_volume()
 
     def _same_grid_op(self, other, np_op):
-        """Fast-path byte-level boolean op for same-grid operands."""
+        """Tier 1: byte-level boolean op for same-grid operands."""
         self._ensure_rendered()
         other._ensure_rendered()
         packed = np_op(self.voxel_data, other.voxel_data)
         return VoxelModel(grid=self.grid, voxel_data=packed,
                           _voxel_shape=self._voxel_shape)
 
+    def _compatible_grid_op(self, other, np_op):
+        """Tier 2: render both on union grid, then byte-level op."""
+        union_grid = self.grid | other.grid
+        left = self.render_on_grid(union_grid)
+        right = other.render_on_grid(union_grid)
+        packed = np_op(left.voxel_data, right.voxel_data)
+        return VoxelModel(grid=union_grid, voxel_data=packed,
+                          _voxel_shape=left._voxel_shape)
+
     def __or__(self, other): #union
+        # Tier 1: same grid with existing data → byte-level
         if (self.voxel_data is not None and other.voxel_data is not None
                 and self.grid.same_grid(other.grid)):
             return self._same_grid_op(other, np.bitwise_or)
+        # Tier 2: compatible grids → render on union grid + byte-level
+        if self.grid.compatible_grid(other.grid):
+            return self._compatible_grid_op(other, np.bitwise_or)
+        # Tier 3: incompatible → CSGModel lazy evaluation
         bounding_grid = self.grid | other.grid
         return CSGModel(self, 'or', other, bounding_grid)
 
     def __and__(self, other): #intersection
+        # Tier 1: same grid with existing data → byte-level
         if (self.voxel_data is not None and other.voxel_data is not None
                 and self.grid.same_grid(other.grid)):
             return self._same_grid_op(other, np.bitwise_and)
+        # Tier 2: compatible grids → render on union grid + byte-level
+        if self.grid.compatible_grid(other.grid):
+            return self._compatible_grid_op(other, np.bitwise_and)
+        # Tier 3: incompatible → CSGModel lazy evaluation
         bounding_grid = self.grid & other.grid
         return CSGModel(self, 'and', other, bounding_grid)
 
     def __xor__(self, other): #exclusive or
+        # Tier 1: same grid with existing data → byte-level
         if (self.voxel_data is not None and other.voxel_data is not None
                 and self.grid.same_grid(other.grid)):
             return self._same_grid_op(other, np.bitwise_xor)
+        # Tier 2: compatible grids → render on union grid + byte-level
+        if self.grid.compatible_grid(other.grid):
+            return self._compatible_grid_op(other, np.bitwise_xor)
+        # Tier 3: incompatible → CSGModel lazy evaluation
         bounding_grid = self.grid | other.grid
         return CSGModel(self, 'xor', other, bounding_grid)
 
     def __sub__(self, other): #difference
+        _sub_op = lambda a, b: np.bitwise_and(a, np.bitwise_not(b))
+        # Tier 1: same grid with existing data → byte-level
         if (self.voxel_data is not None and other.voxel_data is not None
                 and self.grid.same_grid(other.grid)):
-            packed = np.bitwise_and(self.voxel_data,
-                                    np.bitwise_not(other.voxel_data))
+            packed = _sub_op(self.voxel_data, other.voxel_data)
             return VoxelModel(grid=self.grid, voxel_data=packed,
                               _voxel_shape=self._voxel_shape)
+        # Tier 2: compatible grids → render on union grid + byte-level
+        if self.grid.compatible_grid(other.grid):
+            return self._compatible_grid_op(other, _sub_op)
+        # Tier 3: incompatible → CSGModel lazy evaluation
         return CSGModel(self, 'sub', other, self.grid)
 
     def __invert__(self): #bitwise NOT

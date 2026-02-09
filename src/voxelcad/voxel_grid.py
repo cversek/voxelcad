@@ -46,6 +46,18 @@ class VoxelGrid:
                 np.allclose(self.zlim, other.zlim) and
                 np.allclose(self.voxel_size_vector, other.voxel_size_vector))
 
+    def compatible_grid(self, other):
+        """Check if another VoxelGrid has compatible voxel sizing.
+
+        Returns True when voxel_size_vectors match (within tolerance),
+        meaning both grids can be rendered onto a common union grid
+        and combined with byte-level boolean operations.
+
+        Note: same_grid() implies compatible_grid(), but compatible_grid()
+        allows different bounding boxes.
+        """
+        return np.allclose(self.voxel_size_vector, other.voxel_size_vector)
+
     def compute_size_vector(self):
         x0,x1 = self.xlim; y0,y1 = self.ylim; z0,z1 = self.zlim
         return np.array((x1-x0,y1-y0,z1-z0))

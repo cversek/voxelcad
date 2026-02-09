@@ -1,7 +1,8 @@
-"""Benchmark: boolean operations — same-grid fast path vs CSG lazy eval.
+"""Benchmark: boolean operations — Tier 1 (same-grid), Tier 2 (compatible), Tier 3 (CSG).
 
-Same-grid uses byte-level bitwise ops on pre-rendered packed arrays.
-CSG uses per-slice streaming evaluation through the lazy tree.
+Tier 1: byte-level bitwise ops on pre-rendered packed arrays (same grid).
+Tier 2: render_on_grid(union) + byte-level ops (compatible voxel_size).
+Tier 3: CSG per-slice streaming (incompatible voxel_size).
 """
 import numpy as np
 from super_utils.benchmarks import BenchmarkBase
@@ -59,14 +60,14 @@ class BenchmarkSameGridIntersection(BenchmarkBase):
 
 class BenchmarkCSGUnionRender(BenchmarkBase):
     name = "csg_union_render"
-    description = "(Cube | Sphere).render_volume() — different grids, lazy eval"
+    description = "(Cube | Sphere).render_volume() — incompatible grids, CSG path"
     workload_type = "mixed"
 
     def setup(self):
         res = RESOLUTIONS[self.size]
         vs = 10.0 / res
         self.a = Cube(size=10, voxel_size=vs, center=True)
-        self.b = Sphere(r=4, voxel_size=vs)
+        self.b = Sphere(r=4, voxel_size=vs * 2)  # 2x coarser → Tier 3
         self.csg = self.a | self.b
         assert type(self.csg) is CSGModel
 
@@ -86,10 +87,11 @@ class BenchmarkCSGDepth4Render(BenchmarkBase):
     def setup(self):
         res = RESOLUTIONS[self.size]
         vs = 10.0 / res
+        # Use incompatible voxel sizes to force Tier 3 CSG throughout
         a = Cube(size=10, voxel_size=vs, center=True)
-        b = Sphere(r=4, voxel_size=vs)
-        c = Sphere(r=3, voxel_size=vs)
-        d = Sphere(r=5, voxel_size=vs)
+        b = Sphere(r=4, voxel_size=vs * 2)
+        c = Sphere(r=3, voxel_size=vs * 3)
+        d = Sphere(r=5, voxel_size=vs * 1.5)
         self.tree = (a | b) & (c | d)
 
     def run(self):

@@ -37,16 +37,14 @@ def test_double_invert_recovers_original():
 
 
 def test_union_all():
-    """union_all combines a list of models."""
+    """union_all combines a list of models via chained Tier 2 ops."""
     models = [
         Cube(size=10, voxel_size=LOW_RES_VS, center=True),
         Sphere(r=4, voxel_size=LOW_RES_VS),
         Sphere(r=3, voxel_size=LOW_RES_VS),
     ]
     result = union_all(models)
-    # First union is Cube|Sphere (different grid) → CSGModel
-    # Second union nests further
-    assert isinstance(result, (VoxelModel, CSGModel))
-    result.render_volume()
+    # All share voxel_size → Tier 2 chains → materialized VoxelModel
+    assert type(result) is VoxelModel
     assert result.voxel_data is not None
     assert result.voxel_data.sum() > 0
