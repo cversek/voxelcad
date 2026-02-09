@@ -1,5 +1,7 @@
 import os, time
-from typing import OrderedDict
+from dataclasses import dataclass, field
+from typing import OrderedDict, List, Dict, Any, Optional, Tuple
+from enum import Enum
 import numpy as np
 import pyvista as pv
 
@@ -9,6 +11,57 @@ from voxelcad.debug import create_logger, currentframe, DEBUG_TAG, DEBUG_EMBED, 
 LOGGER = create_logger(__name__)
 
 from voxelcad.voxel_grid import VoxelGrid, UniformGrid
+from voxelcad._kernels import CYTHON_AVAILABLE
+
+
+class LeafType(Enum):
+    """Classification of CSG tree leaf nodes for execution planning."""
+    FUSED = "fused"           # Primitive with Cython kernel available
+    MATERIALIZED = "materialized"  # Already has packed voxel_data
+    FALLBACK = "fallback"     # TransformedModel or requires per-slice streaming
+
+
+@dataclass
+class LeafNode:
+    """A leaf in the CSG tree with its classification and grid info."""
+    model: Any  # VoxelModel subclass
+    leaf_type: LeafType
+    grid: 'VoxelGrid'
+
+    @property
+    def voxel_size(self) -> np.ndarray:
+        return self.grid.voxel_size_vector
+
+
+@dataclass
+class ExecutionPlan:
+    """Query plan for optimized CSG tree execution.
+
+    Analyzes the CSG tree structure and determines:
+    - Which leaves can use fused Cython kernels
+    - Which subtrees share compatible grids (can use byte-level ops)
+    - The optimal execution order
+
+    Attributes:
+        leaves: All leaf nodes in tree traversal order
+        operations: Internal CSG operations in post-order
+        all_compatible: True if all leaves share compatible voxel_size
+        all_fused_capable: True if all leaves can use Cython kernels
+        common_grid: Union grid if all_compatible, else None
+        strategy: 'fused_bytewise' | 'mixed' | 'streaming'
+    """
+    leaves: List[LeafNode] = field(default_factory=list)
+    operations: List[Tuple[str, int, int]] = field(default_factory=list)  # (op, left_idx, right_idx)
+    all_compatible: bool = False
+    all_fused_capable: bool = False
+    common_grid: Optional['VoxelGrid'] = None
+    strategy: str = "streaming"  # Default fallback
+
+    def __repr__(self):
+        return (f"ExecutionPlan(leaves={len(self.leaves)}, "
+                f"strategy={self.strategy!r}, "
+                f"all_compatible={self.all_compatible}, "
+                f"all_fused_capable={self.all_fused_capable})")
 
 
 class VoxelModel:
@@ -75,6 +128,26 @@ class VoxelModel:
     def _has_evaluate_slice(self):
         """Check if this model has a real geometry evaluation function."""
         return type(self).evaluate_slice is not VoxelModel.evaluate_slice
+
+    def _is_fused_capable(self):
+        """Check if this model can use a Cython fused kernel.
+
+        Override in primitive subclasses that have Cython kernels.
+        Returns True only if CYTHON_AVAILABLE and primitive has a kernel.
+        """
+        return False
+
+    def _classify_leaf(self) -> LeafNode:
+        """Classify this model as a CSG tree leaf node.
+
+        Returns:
+            LeafNode with appropriate type classification
+        """
+        if self.voxel_data is not None:
+            return LeafNode(self, LeafType.MATERIALIZED, self.grid)
+        if self._is_fused_capable():
+            return LeafNode(self, LeafType.FUSED, self.grid)
+        return LeafNode(self, LeafType.FALLBACK, self.grid)
 
     def _get_slice_for_coords(self, X_2d, Y_2d, z_val):
         """Get a boolean slice for the given coordinates.
@@ -507,6 +580,94 @@ class CSGModel(VoxelModel):
         R = self.right._get_slice_for_coords(X_2d, Y_2d, z_val)
         return self._OP_MAP[self.op](L, R)
 
+    def _collect_leaves(self, leaves: List[LeafNode], ops: List[Tuple[str, int, int]]) -> int:
+        """Recursively collect leaves and operations from this CSG tree.
+
+        Args:
+            leaves: List to append leaf nodes to
+            ops: List to append operations to (postfix order)
+
+        Returns:
+            Index of this node's result in the evaluation stack
+        """
+        # Process left subtree
+        if isinstance(self.left, CSGModel):
+            left_idx = self.left._collect_leaves(leaves, ops)
+        else:
+            left_idx = len(leaves)
+            leaves.append(self.left._classify_leaf())
+
+        # Process right subtree
+        if isinstance(self.right, CSGModel):
+            right_idx = self.right._collect_leaves(leaves, ops)
+        else:
+            right_idx = len(leaves)
+            leaves.append(self.right._classify_leaf())
+
+        # Record this operation (postfix: left, right, then op)
+        result_idx = len(leaves) + len(ops)
+        ops.append((self.op, left_idx, right_idx))
+        return result_idx
+
+    def _plan_execution(self) -> ExecutionPlan:
+        """Analyze CSG tree and create an optimized execution plan.
+
+        Walks the tree to:
+        1. Collect all leaf nodes with their classifications
+        2. Record operations in postfix order
+        3. Determine if all leaves share compatible grids
+        4. Choose optimal execution strategy
+
+        Returns:
+            ExecutionPlan with leaves, operations, and strategy
+        """
+        plan = ExecutionPlan()
+
+        # Collect tree structure
+        self._collect_leaves(plan.leaves, plan.operations)
+
+        if not plan.leaves:
+            return plan
+
+        # Check grid compatibility across all leaves
+        first_vs = plan.leaves[0].voxel_size
+        plan.all_compatible = all(
+            np.allclose(leaf.voxel_size, first_vs)
+            for leaf in plan.leaves
+        )
+
+        # Check if all leaves can use fused kernels
+        plan.all_fused_capable = all(
+            leaf.leaf_type in (LeafType.FUSED, LeafType.MATERIALIZED)
+            for leaf in plan.leaves
+        )
+
+        # Compute common grid if all compatible
+        if plan.all_compatible:
+            # Union of all leaf grids
+            union_grid = plan.leaves[0].grid
+            for leaf in plan.leaves[1:]:
+                union_grid = union_grid | leaf.grid
+            plan.common_grid = union_grid
+
+        # Determine execution strategy
+        if plan.all_compatible and plan.all_fused_capable:
+            plan.strategy = "fused_bytewise"
+        elif plan.all_compatible:
+            plan.strategy = "mixed"
+        else:
+            plan.strategy = "streaming"
+
+        return plan
+
+    def _classify_leaf(self) -> LeafNode:
+        """CSGModel is not a leaf — it's an internal node.
+
+        This should not be called on CSGModel directly, but if it is
+        (e.g., nested CSG that wasn't flattened), treat as fallback.
+        """
+        return LeafNode(self, LeafType.FALLBACK, self.grid)
+
 
 class TransformedModel(VoxelModel):
     """Lazy affine transform — defers materialization until consumption.
@@ -579,6 +740,10 @@ class TransformedModel(VoxelModel):
         composed_M4inv = self.M4inv @ Tinv
         new_grid = self._transform_corners(self.source, composed_M4)
         return TransformedModel(self.source, composed_M4, composed_M4inv, new_grid)
+
+    def _classify_leaf(self) -> LeafNode:
+        """TransformedModel is always FALLBACK until Phase 10.4 adds fused inverse kernel."""
+        return LeafNode(self, LeafType.FALLBACK, self.grid)
 
 
 def union_all(models):

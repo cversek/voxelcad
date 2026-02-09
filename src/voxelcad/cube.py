@@ -34,6 +34,10 @@ class Cube(VoxelModel):
                (np.abs(Y_2d-cy) <= sy/2) &\
                (np.abs(z_val-cz) <= sz/2)
 
+    def _is_fused_capable(self):
+        """Cube has a Cython fused kernel when available."""
+        return CYTHON_AVAILABLE and evaluate_and_pack_cube is not None
+
     def render_volume(self):
         if not CYTHON_AVAILABLE:
             return super().render_volume()

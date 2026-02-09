@@ -47,6 +47,10 @@ class GyroidCube(Cube):
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         return V
 
+    def _is_fused_capable(self):
+        """GyroidCube has a Cython fused kernel when available."""
+        return CYTHON_AVAILABLE and evaluate_and_pack_gyroid is not None
+
     def render_volume(self):
         if not CYTHON_AVAILABLE:
             return super().render_volume()
@@ -109,6 +113,10 @@ class WigglyGyroidCube(GyroidCube):
         V &= Cube.evaluate_slice(self, X_2d, Y_2d, z_val)
         return V
 
+    def _is_fused_capable(self):
+        """WigglyGyroidCube has a Cython fused kernel when available."""
+        return CYTHON_AVAILABLE and evaluate_and_pack_wiggly_gyroid is not None
+
     def render_volume(self):
         if not CYTHON_AVAILABLE:
             return super().render_volume()
@@ -169,6 +177,10 @@ class HyperWigglyGyroidCube(GyroidCube):
         # intersect with cube bounds
         V &= Cube.evaluate_slice(self, X_2d, Y_2d, z_val)
         return V
+
+    def _is_fused_capable(self):
+        """HyperWigglyGyroidCube has a Cython fused kernel when available."""
+        return CYTHON_AVAILABLE and evaluate_and_pack_hyperwiggly_gyroid is not None
 
     def render_volume(self):
         if not CYTHON_AVAILABLE:

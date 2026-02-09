@@ -55,6 +55,10 @@ class Cylinder(VoxelModel):
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         return (Xc**2 + Yc**2 <= R**2) & ((0.0 <= Pz) & (Pz <= 1.0))
 
+    def _is_fused_capable(self):
+        """Cylinder has a Cython fused kernel when available."""
+        return CYTHON_AVAILABLE and evaluate_and_pack_cylinder is not None
+
     def render_volume(self):
         if not CYTHON_AVAILABLE:
             return super().render_volume()
