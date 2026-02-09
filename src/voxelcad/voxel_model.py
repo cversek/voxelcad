@@ -129,6 +129,25 @@ class VoxelModel:
         """Check if this model has a real geometry evaluation function."""
         return type(self).evaluate_slice is not VoxelModel.evaluate_slice
 
+    def _has_evaluate_at_coords(self):
+        """Check if this model can evaluate geometry at arbitrary coordinates."""
+        return type(self).evaluate_at_coords is not VoxelModel.evaluate_at_coords
+
+    def evaluate_at_coords(self, X, Y, Z):
+        """Evaluate geometry at arbitrary coordinate arrays.
+
+        Unlike evaluate_slice() which takes a scalar z_val, this method
+        accepts Z as an array of the same shape as X and Y. Enables
+        TransformedModel to evaluate source primitives at inverse-transformed
+        coordinates without intermediate volume allocation.
+
+        Subclasses (primitives) should override this with their geometry formula.
+        Default implementation falls back to per-voxel indexing into rendered volume.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} must implement evaluate_at_coords()"
+        )
+
     def _is_fused_capable(self):
         """Check if this model can use a Cython fused kernel.
 
@@ -759,7 +778,25 @@ class TransformedModel(VoxelModel):
         self.M4inv = M4inv  # 4x4 inverse transform
 
     def evaluate_slice(self, X_2d, Y_2d, z_val):
-        """Evaluate by inverse-transforming coordinates into source space."""
+        """Evaluate by inverse-transforming coordinates into source space.
+
+        If source has evaluate_at_coords(), evaluates geometry directly
+        at inverse-transformed coordinates (no intermediate volume).
+        Otherwise falls back to rendering source and indexing.
+        """
+        Minv = self.M4inv
+        Z_2d = np.full_like(X_2d, z_val)
+
+        # Inverse transform: target coords → source coords
+        X_orig = Minv[0,0]*X_2d + Minv[0,1]*Y_2d + Minv[0,2]*Z_2d + Minv[0,3]
+        Y_orig = Minv[1,0]*X_2d + Minv[1,1]*Y_2d + Minv[1,2]*Z_2d + Minv[1,3]
+        Z_orig = Minv[2,0]*X_2d + Minv[2,1]*Y_2d + Minv[2,2]*Z_2d + Minv[2,3]
+
+        # If source can evaluate at arbitrary coords, use it directly
+        if self.source._has_evaluate_at_coords():
+            return self.source.evaluate_at_coords(X_orig, Y_orig, Z_orig)
+
+        # Fallback: render source and index into packed data
         if self.source.voxel_data is None:
             self.source.render_volume()
         V_src = self.source._unpack_volume()
@@ -767,12 +804,6 @@ class TransformedModel(VoxelModel):
         sx0, sx1 = self.source.grid.xlim
         sy0, sy1 = self.source.grid.ylim
         sz0, sz1 = self.source.grid.zlim
-        Minv = self.M4inv
-        Z_2d = np.full_like(X_2d, z_val)
-        # Affine inverse: includes translation
-        X_orig = Minv[0,0]*X_2d + Minv[0,1]*Y_2d + Minv[0,2]*Z_2d + Minv[0,3]
-        Y_orig = Minv[1,0]*X_2d + Minv[1,1]*Y_2d + Minv[1,2]*Z_2d + Minv[1,3]
-        Z_orig = Minv[2,0]*X_2d + Minv[2,1]*Y_2d + Minv[2,2]*Z_2d + Minv[2,3]
         I = np.floor(src_rx * (X_orig - sx0) / (sx1 - sx0)).astype('int')
         J = np.floor(src_ry * (Y_orig - sy0) / (sy1 - sy0)).astype('int')
         K = np.floor(src_rz * (Z_orig - sz0) / (sz1 - sz0)).astype('int')
@@ -817,7 +848,14 @@ class TransformedModel(VoxelModel):
         return TransformedModel(self.source, composed_M4, composed_M4inv, new_grid)
 
     def _classify_leaf(self) -> LeafNode:
-        """TransformedModel is always FALLBACK until Phase 10.4 adds fused inverse kernel."""
+        """Classify TransformedModel based on source's evaluation capability.
+
+        If source has evaluate_at_coords(), TransformedModel can evaluate
+        directly without intermediate volume → promotes to FUSED.
+        Otherwise remains FALLBACK (requires source render + index).
+        """
+        if self.source._has_evaluate_at_coords():
+            return LeafNode(self, LeafType.FUSED, self.grid)
         return LeafNode(self, LeafType.FALLBACK, self.grid)
 
 

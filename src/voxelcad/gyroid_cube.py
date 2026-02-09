@@ -47,6 +47,26 @@ class GyroidCube(Cube):
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         return V
 
+    def evaluate_at_coords(self, X, Y, Z):
+        """Evaluate gyroid geometry at arbitrary coordinates."""
+        a = pi*self.lattice_param
+        Xa = X * a[0]
+        Ya = Y * a[1]
+        Za = Z * a[2]
+        phi = self.phi
+        F = cos(Xa + phi[0])*sin(Ya + phi[1]) +\
+            cos(Ya + phi[1])*sin(Za + phi[2]) +\
+            cos(Za + phi[2])*sin(Xa + phi[0]) - self.structure_param
+        if self.thresh1 is not None and self.thresh2 is not None:
+            V = ((F > self.thresh1) & (F < self.thresh2))
+        elif self.thresh1 is not None:
+            V = (F > 0) & (F < self.thresh1)
+        else:
+            raise ValueError("Either or both thresh1, thresh2 should not be None")
+        # intersect with cube bounds
+        V &= Cube.evaluate_at_coords(self, X, Y, Z)
+        return V
+
     def _is_fused_capable(self):
         """GyroidCube has a Cython fused kernel when available."""
         return CYTHON_AVAILABLE and evaluate_and_pack_gyroid is not None

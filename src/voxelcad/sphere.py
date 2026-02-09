@@ -24,6 +24,12 @@ class Sphere(VoxelModel):
         cx,cy,cz = self.grid.compute_center_vector()
         return ((X_2d-cx)**2 + (Y_2d-cy)**2 + (z_val-cz)**2 <= r**2)
 
+    def evaluate_at_coords(self, X, Y, Z):
+        """Evaluate sphere geometry at arbitrary coordinates."""
+        r = self.r
+        cx,cy,cz = self.grid.compute_center_vector()
+        return ((X-cx)**2 + (Y-cy)**2 + (Z-cz)**2 <= r**2)
+
     def _is_fused_capable(self):
         """Sphere has a Cython fused kernel when available."""
         return CYTHON_AVAILABLE and evaluate_and_pack_sphere is not None

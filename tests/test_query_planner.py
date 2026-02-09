@@ -44,13 +44,18 @@ class TestLeafClassification:
         leaf = s._classify_leaf()
         assert leaf.leaf_type == LeafType.MATERIALIZED
 
-    def test_transformed_always_fallback(self):
-        """TransformedModel always classifies as FALLBACK."""
+    def test_transformed_with_primitive_source_is_fused(self):
+        """TransformedModel with primitive source classifies as FUSED.
+
+        Phase 10.4: When source has evaluate_at_coords(), TransformedModel
+        can evaluate geometry directly at inverse-transformed coordinates.
+        """
         s = Sphere(r=5, voxel_size=VS)
         t = s.rotate_z(45)
         assert isinstance(t, TransformedModel)
         leaf = t._classify_leaf()
-        assert leaf.leaf_type == LeafType.FALLBACK
+        # Source (Sphere) has evaluate_at_coords → TransformedModel is FUSED
+        assert leaf.leaf_type == LeafType.FUSED
 
     def test_all_primitives_fused_capable(self):
         """All primitive types report _is_fused_capable() correctly."""
@@ -173,19 +178,22 @@ class TestExecutionStrategySelection:
             if plan.all_compatible and plan.all_fused_capable:
                 assert plan.strategy == "fused_bytewise"
 
-    def test_mixed_when_compatible_but_has_fallback(self):
-        """Compatible grids but TransformedModel → strategy='mixed'."""
+    def test_transformed_with_primitive_source_is_fused_capable(self):
+        """TransformedModel with primitive source now classifies as FUSED.
+
+        Phase 10.4: With evaluate_at_coords(), transformed primitives
+        are fused-capable, enabling fused_bytewise strategy.
+        """
         a = Sphere(r=5, voxel_size=VS * 2)
-        t = a.rotate_z(45)  # TransformedModel → FALLBACK
+        t = a.rotate_z(45)  # TransformedModel with primitive source → FUSED
         b = Cube(size=8, voxel_size=VS * 2)
-        # t has same voxel_size as b
         csg = t & b
         if isinstance(csg, CSGModel):
             plan = csg._plan_execution()
+            # Both leaves are now fused-capable
+            assert plan.all_fused_capable
             if plan.all_compatible:
-                # Has a FALLBACK leaf, so not all fused
-                if not plan.all_fused_capable:
-                    assert plan.strategy == "mixed"
+                assert plan.strategy == "fused_bytewise"
 
 
 class TestExecutionPlanRepr:

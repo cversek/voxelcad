@@ -55,6 +55,19 @@ class Cylinder(VoxelModel):
         #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
         return (Xc**2 + Yc**2 <= R**2) & ((0.0 <= Pz) & (Pz <= 1.0))
 
+    def evaluate_at_coords(self, X, Y, Z):
+        """Evaluate cylinder geometry at arbitrary coordinates."""
+        cx,cy,cz = self.grid.compute_center_vector()
+        Xc = X - cx
+        Yc = Y - cy
+        Zc = Z - cz
+        h = self.h
+        r1 = self.r1
+        r2 = self.r2
+        Pz = Zc/h + 0.5
+        R = r1*(1.0-Pz) + r2*Pz
+        return (Xc**2 + Yc**2 <= R**2) & ((0.0 <= Pz) & (Pz <= 1.0))
+
     def _is_fused_capable(self):
         """Cylinder has a Cython fused kernel when available."""
         return CYTHON_AVAILABLE and evaluate_and_pack_cylinder is not None

@@ -34,6 +34,12 @@ class Cube(VoxelModel):
                (np.abs(Y_2d-cy) <= sy/2) &\
                (np.abs(z_val-cz) <= sz/2)
 
+    def evaluate_at_coords(self, X, Y, Z):
+        """Evaluate cube geometry at arbitrary coordinates."""
+        sx,sy,sz = self.size
+        cx,cy,cz = self.grid.compute_center_vector()
+        return (np.abs(X-cx) <= sx/2) & (np.abs(Y-cy) <= sy/2) & (np.abs(Z-cz) <= sz/2)
+
     def _is_fused_capable(self):
         """Cube has a Cython fused kernel when available."""
         return CYTHON_AVAILABLE and evaluate_and_pack_cube is not None
