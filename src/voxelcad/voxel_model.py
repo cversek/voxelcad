@@ -668,6 +668,81 @@ class CSGModel(VoxelModel):
         """
         return LeafNode(self, LeafType.FALLBACK, self.grid)
 
+    # Byte-level operation map for packed arrays
+    _BYTEWISE_OP_MAP = {
+        'or':  np.bitwise_or,
+        'and': np.bitwise_and,
+        'xor': np.bitwise_xor,
+        'sub': lambda a, b: np.bitwise_and(a, np.bitwise_not(b)),
+    }
+
+    def render_volume(self):
+        """Render CSG tree using query-planned execution.
+
+        Analyzes the tree structure and chooses optimal strategy:
+        - fused_bytewise/mixed: render leaves to common grid, combine with byte-level ops
+        - streaming: per-slice evaluation (fallback)
+        """
+        if self.voxel_data is not None:
+            return self.voxel_data
+
+        plan = self._plan_execution()
+
+        # Use optimized path when all leaves share compatible grids
+        if plan.strategy in ("fused_bytewise", "mixed") and plan.common_grid is not None:
+            return self._render_planned(plan)
+
+        # Fallback: streaming per-slice evaluation
+        return self._render_streaming()
+
+    def _render_planned(self, plan: ExecutionPlan):
+        """Execute CSG tree using query plan with byte-level combination.
+
+        Renders all leaves onto the common grid, then applies operations
+        in postfix order using byte-level bitwise ops on packed arrays.
+        """
+        TIMING_START("render_volume_planned")
+        common_grid = plan.common_grid
+
+        # Render all leaves onto the common grid
+        rendered = []
+        for leaf in plan.leaves:
+            vm = leaf.model.render_on_grid(common_grid)
+            rendered.append(vm.voxel_data)
+
+        # Apply operations in postfix order
+        # Stack holds intermediate results (packed arrays)
+        stack = list(rendered)  # Start with leaf results
+
+        for op, left_idx, right_idx in plan.operations:
+            left_data = stack[left_idx]
+            right_data = stack[right_idx]
+            result = self._BYTEWISE_OP_MAP[op](left_data, right_data)
+            stack.append(result)
+
+        # Final result is the last item on the stack
+        self.voxel_data = stack[-1]
+        self._voxel_shape = (int(common_grid.res_vector[0]),
+                             int(common_grid.res_vector[1]),
+                             int(common_grid.res_vector[2]))
+        self.grid = common_grid
+        TIMING_END("render_volume_planned")
+        return self.voxel_data
+
+    def _render_streaming(self):
+        """Fallback: render using per-slice streaming evaluation."""
+        TIMING_START("render_volume_streaming")
+        if self.grid is None:
+            raise ValueError("CSGModel requires a grid")
+        rx, ry, rz = self.grid.res_vector
+        V = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
+        for X_2d, Y_2d, z_val, k in self.grid.iter_slices():
+            V[:, :, k] = self.evaluate_slice(X_2d, Y_2d, z_val)
+        self._voxel_shape = V.shape
+        self.voxel_data = np.packbits(V.ravel(order='F'))
+        TIMING_END("render_volume_streaming")
+        return self.voxel_data
+
 
 class TransformedModel(VoxelModel):
     """Lazy affine transform — defers materialization until consumption.

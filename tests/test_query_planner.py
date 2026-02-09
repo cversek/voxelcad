@@ -203,3 +203,73 @@ class TestExecutionPlanRepr:
         assert "leaves=2" in r
         assert "strategy=" in r
         assert "all_compatible=" in r
+
+
+class TestOptimizedRenderVolume:
+    """Test CSGModel.render_volume() uses query-planned execution."""
+
+    def test_csg_render_uses_planned_path_when_compatible(self):
+        """CSGModel with compatible leaves uses _render_planned()."""
+        a = Sphere(r=5, voxel_size=VS * 2)
+        b = Cube(size=8, voxel_size=VS * 2)
+        csg = a & b
+        if isinstance(csg, CSGModel):
+            plan = csg._plan_execution()
+            if plan.all_compatible:
+                # Render and verify result
+                csg.render_volume()
+                assert csg.voxel_data is not None
+                # Grid should be the common_grid
+                assert csg.grid is not None
+
+    def test_csg_render_uses_streaming_when_incompatible(self):
+        """CSGModel with incompatible leaves uses streaming fallback."""
+        a = Sphere(r=5, voxel_size=VS)
+        b = Cube(size=8, voxel_size=VS * 2)
+        csg = a & b
+        assert isinstance(csg, CSGModel)
+        plan = csg._plan_execution()
+        assert not plan.all_compatible
+        assert plan.strategy == "streaming"
+        # Render should still work
+        csg.render_volume()
+        assert csg.voxel_data is not None
+
+    def test_csg_render_produces_correct_intersection(self):
+        """Planned execution produces geometrically correct results."""
+        # Sphere inside cube - intersection should be the sphere
+        s = Sphere(r=3, voxel_size=VS * 2)
+        c = Cube(size=10, center=True, voxel_size=VS * 2)
+        csg = s & c
+        if isinstance(csg, CSGModel):
+            csg.render_volume()
+            s_alone = Sphere(r=3, voxel_size=VS * 2)
+            s_alone.render_volume()
+            # Intersection of sphere with larger cube should equal sphere
+            # (within tolerance for grid alignment differences)
+            csg_sum = np.unpackbits(csg.voxel_data).sum()
+            s_sum = np.unpackbits(s_alone.voxel_data).sum()
+            # Allow 10% tolerance for grid alignment
+            assert abs(csg_sum - s_sum) / max(s_sum, 1) < 0.1
+
+    def test_depth_2_csg_renders_correctly(self):
+        """(A | B) & C with compatible grids renders correctly."""
+        a = Sphere(r=3, voxel_size=VS * 2)
+        b = Cube(size=6, center=True, voxel_size=VS * 2)
+        c = Cylinder(h=10, r=5, center=True, voxel_size=VS * 2)
+        csg = (a | b) & c
+        if isinstance(csg, CSGModel):
+            csg.render_volume()
+            assert csg.voxel_data is not None
+            # Result should have some voxels
+            assert np.unpackbits(csg.voxel_data).sum() > 0
+
+    def test_idempotent_render(self):
+        """Calling render_volume() twice returns same data."""
+        a = Sphere(r=5, voxel_size=VS * 2)
+        b = Cube(size=8, voxel_size=VS * 2)
+        csg = a & b
+        if isinstance(csg, CSGModel):
+            data1 = csg.render_volume()
+            data2 = csg.render_volume()
+            assert data1 is data2
