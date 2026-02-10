@@ -1,7 +1,6 @@
 import os, time
 from dataclasses import dataclass, field
 from typing import OrderedDict, List, Dict, Any, Optional, Tuple
-from enum import Enum
 import numpy as np
 import pyvista as pv
 
@@ -11,57 +10,29 @@ from voxelcad.debug import create_logger, currentframe, DEBUG_TAG, DEBUG_EMBED, 
 LOGGER = create_logger(__name__)
 
 from voxelcad.voxel_grid import VoxelGrid, UniformGrid
-from voxelcad._kernels import CYTHON_AVAILABLE
-
-
-class LeafType(Enum):
-    """Classification of CSG tree leaf nodes for execution planning."""
-    FUSED = "fused"           # Primitive with Cython kernel available
-    MATERIALIZED = "materialized"  # Already has packed voxel_data
-    FALLBACK = "fallback"     # TransformedModel or requires per-slice streaming
 
 
 @dataclass
 class LeafNode:
-    """A leaf in the CSG tree with its classification and grid info."""
+    """A leaf in the CSG tree with its grid info."""
     model: Any  # VoxelModel subclass
-    leaf_type: LeafType
     grid: 'VoxelGrid'
-
-    @property
-    def voxel_size(self) -> np.ndarray:
-        return self.grid.voxel_size_vector
 
 
 @dataclass
 class ExecutionPlan:
-    """Query plan for optimized CSG tree execution.
+    """Query plan for CSG tree execution.
 
-    Analyzes the CSG tree structure and determines:
-    - Which leaves can use fused Cython kernels
-    - Which subtrees share compatible grids (can use byte-level ops)
-    - The optimal execution order
-
-    Attributes:
-        leaves: All leaf nodes in tree traversal order
-        operations: Internal CSG operations in post-order
-        all_compatible: True if all leaves share compatible voxel_size
-        all_fused_capable: True if all leaves can use Cython kernels
-        common_grid: Union grid if all_compatible, else None
-        strategy: 'fused_bytewise' | 'mixed' | 'streaming'
+    All leaves render on a common grid via render_on_grid(),
+    then results are combined with byte-level bitwise ops.
     """
     leaves: List[LeafNode] = field(default_factory=list)
-    operations: List[Tuple[str, int, int]] = field(default_factory=list)  # (op, left_idx, right_idx)
-    all_compatible: bool = False
-    all_fused_capable: bool = False
+    operations: List[Tuple[str, int, int]] = field(default_factory=list)
     common_grid: Optional['VoxelGrid'] = None
-    strategy: str = "streaming"  # Default fallback
 
     def __repr__(self):
         return (f"ExecutionPlan(leaves={len(self.leaves)}, "
-                f"strategy={self.strategy!r}, "
-                f"all_compatible={self.all_compatible}, "
-                f"all_fused_capable={self.all_fused_capable})")
+                f"common_grid={'set' if self.common_grid else 'None'})")
 
 
 class VoxelModel:
@@ -110,127 +81,99 @@ class VoxelModel:
         bit_offset = start - byte_start * 8
         return bits[bit_offset:bit_offset + slice_size].reshape(rx, ry, order='F').view(np.bool_)
 
-    def evaluate_slice(self, X_2d, Y_2d, z_val):
-        """Evaluate this model's volume for a single Z-slice.
+    def render_on_grid(self, grid, M4inv=None):
+        """THE unified interface for geometry evaluation.
 
-        Subclasses override this to implement their geometry.
-        Returns a 2D boolean array of shape (rx, ry).
+        Returns packed uint8 array (F-order) representing the model
+        evaluated on the given grid coordinates.
 
-        Args:
-            X_2d: 2D array of X coordinates, shape (rx, ry)
-            Y_2d: 2D array of Y coordinates, shape (rx, ry)
-            z_val: scalar Z coordinate for this slice
-        """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} must implement evaluate_slice()"
-        )
-
-    def _has_evaluate_slice(self):
-        """Check if this model has a real geometry evaluation function."""
-        return type(self).evaluate_slice is not VoxelModel.evaluate_slice
-
-    def _has_evaluate_at_coords(self):
-        """Check if this model can evaluate geometry at arbitrary coordinates."""
-        return type(self).evaluate_at_coords is not VoxelModel.evaluate_at_coords
-
-    def evaluate_at_coords(self, X, Y, Z):
-        """Evaluate geometry at arbitrary coordinate arrays.
-
-        Unlike evaluate_slice() which takes a scalar z_val, this method
-        accepts Z as an array of the same shape as X and Y. Enables
-        TransformedModel to evaluate source primitives at inverse-transformed
-        coordinates without intermediate volume allocation.
-
-        Subclasses (primitives) should override this with their geometry formula.
-        Default implementation falls back to per-voxel indexing into rendered volume.
-        """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} must implement evaluate_at_coords()"
-        )
-
-    def _is_fused_capable(self):
-        """Check if this model can use a Cython fused kernel.
-
-        Override in primitive subclasses that have Cython kernels.
-        Returns True only if CYTHON_AVAILABLE and primitive has a kernel.
-        """
-        return False
-
-    def _classify_leaf(self) -> LeafNode:
-        """Classify this model as a CSG tree leaf node.
-
-        Returns:
-            LeafNode with appropriate type classification
-        """
-        if self.voxel_data is not None:
-            return LeafNode(self, LeafType.MATERIALIZED, self.grid)
-        if self._is_fused_capable():
-            return LeafNode(self, LeafType.FUSED, self.grid)
-        return LeafNode(self, LeafType.FALLBACK, self.grid)
-
-    def _get_slice_for_coords(self, X_2d, Y_2d, z_val):
-        """Get a boolean slice for the given coordinates.
-
-        If the model has evaluate_slice (primitives), uses it directly.
-        If the model only has packed data (transformed models), renders
-        if needed, then maps coordinates to indices and extracts bits
-        from packed storage without full unpack.
+        Base class default: nearest-neighbor resampling of existing packed data.
+        Primitives override _render_cython/_render_numpy with geometry evaluation.
 
         Args:
-            X_2d: 2D array of X coordinates
-            Y_2d: 2D array of Y coordinates
-            z_val: scalar Z coordinate
-
-        Returns:
-            2D boolean array
+            grid: Target VoxelGrid to evaluate on
+            M4inv: Optional 4x4 inverse transform matrix
         """
-        if self._has_evaluate_slice():
-            return self.evaluate_slice(X_2d, Y_2d, z_val)
-        # Fallback: extract Z-slice from packed storage, then index with X,Y
-        if self.voxel_data is None:
-            self.render_volume()
-        x0, x1 = self.grid.xlim
-        y0, y1 = self.grid.ylim
-        z0, z1 = self.grid.zlim
-        rx, ry, rz = self.grid.res_vector
-        k = int(np.floor(rz * (z_val - z0) / (z1 - z0)))
-        if k < 0 or k >= rz:
-            return np.zeros(X_2d.shape, dtype='bool')
-        V_slice = self._unpack_slice(k)
-        I = np.floor(rx * (X_2d - x0) / (x1 - x0)).astype('int')
-        J = np.floor(ry * (Y_2d - y0) / (y1 - y0)).astype('int')
-        valid = (I >= 0) & (I < rx) & (J >= 0) & (J < ry)
-        I_safe = np.where(valid, I, 0)
-        J_safe = np.where(valid, J, 0)
-        return np.where(valid, V_slice[I_safe, J_safe], False)
+        # Same-grid shortcut: no work needed
+        if M4inv is None and self.voxel_data is not None and self.grid.same_grid(grid):
+            return self.voxel_data
+        # Dispatch to Cython or NumPy implementation
+        if ENV.use_cython:
+            return self._render_cython(grid, M4inv)
+        return self._render_numpy(grid, M4inv)
+
+    def _render_cython(self, grid, M4inv=None):
+        """Cython implementation. Base class: nearest-neighbor resampling.
+
+        Primitives override with geometry-specific Cython kernels.
+        """
+        from voxelcad._kernels import resample_and_pack
+        if resample_and_pack is None:
+            return self._render_numpy(grid, M4inv)
+        src_data = self.render_volume()
+        src_rx, src_ry, src_rz = [int(r) for r in self.grid.res_vector]
+        src_xcc, src_ycc, src_zcc = self.grid.compute_cell_center_ranges()
+        dst_xcc, dst_ycc, dst_zcc = grid.compute_cell_center_ranges()
+        return resample_and_pack(
+            src_xcc, src_ycc, src_zcc, src_data,
+            src_rx, src_ry, src_rz,
+            dst_xcc, dst_ycc, dst_zcc, M4inv)
+
+    def _render_numpy(self, grid, M4inv=None):
+        """NumPy implementation. Base class: nearest-neighbor resampling.
+
+        Primitives override with geometry-specific NumPy evaluation.
+        """
+        src_data = self.render_volume()  # ensure source is materialized
+        src_rx, src_ry, src_rz = [int(r) for r in self.grid.res_vector]
+        sx0, sx1 = self.grid.xlim
+        sy0, sy1 = self.grid.ylim
+        sz0, sz1 = self.grid.zlim
+
+        dst_rx, dst_ry, dst_rz = [int(r) for r in grid.res_vector]
+        V = np.zeros((dst_rx, dst_ry, dst_rz), dtype='bool')
+
+        for X_2d, Y_2d, z_val, k in grid.iter_slices():
+            if M4inv is not None:
+                Z_2d = np.full_like(X_2d, z_val)
+                Xp = M4inv[0,0]*X_2d + M4inv[0,1]*Y_2d + M4inv[0,2]*Z_2d + M4inv[0,3]
+                Yp = M4inv[1,0]*X_2d + M4inv[1,1]*Y_2d + M4inv[1,2]*Z_2d + M4inv[1,3]
+                Zp = M4inv[2,0]*X_2d + M4inv[2,1]*Y_2d + M4inv[2,2]*Z_2d + M4inv[2,3]
+            else:
+                Xp, Yp = X_2d, Y_2d
+                Zp = np.full_like(X_2d, z_val)
+
+            # Nearest-neighbor index into source grid
+            I = np.floor(src_rx * (Xp - sx0) / (sx1 - sx0)).astype('int')
+            J = np.floor(src_ry * (Yp - sy0) / (sy1 - sy0)).astype('int')
+            K_idx = np.floor(src_rz * (Zp - sz0) / (sz1 - sz0)).astype('int')
+            valid = ((I >= 0) & (I < src_rx) &
+                     (J >= 0) & (J < src_ry) &
+                     (K_idx >= 0) & (K_idx < src_rz))
+            I_safe = np.where(valid, I, 0)
+            J_safe = np.where(valid, J, 0)
+            K_safe = np.where(valid, K_idx, 0)
+
+            # Bit lookup in F-order packed array
+            lin_idx = I_safe + J_safe * src_rx + K_safe * src_rx * src_ry
+            byte_idx = lin_idx >> 3
+            bit_idx = lin_idx & 7
+            bits = (src_data[byte_idx] >> bit_idx) & 1
+            V[:, :, k] = np.where(valid, bits.astype(bool), False)
+
+        return np.packbits(V.ravel(order='F'))
 
     def render_volume(self):
-        """Render volume using streaming Z-slice evaluation.
-
-        Iterates over Z-slices, calling evaluate_slice() for each,
-        and accumulates into a pre-allocated 3D boolean array.
-        Returns existing data if already rendered.
-        """
+        """Render on own grid and cache. Returns packed uint8."""
         if self.voxel_data is not None:
             return self.voxel_data
         if self.grid is None:
             self.construct_grid()
         TIMING_START("render_volume")
-        LOGGER.info(40*"*")
-        LOGGER.info(f"{self.__class__} -> render_volume (streaming)")
-        mem0 = MEMORY_USAGE()
-        LOGGER.info(f"TOTAL MEMORY USED: {mem0/2**30:0.2f} GB")
-        LOGGER.info(40*"-")
-        rx, ry, rz = self.grid.res_vector
-        V = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
-        for X_2d, Y_2d, z_val, k in self.grid.iter_slices():
-            V[:, :, k] = self.evaluate_slice(X_2d, Y_2d, z_val)
-        self._voxel_shape = V.shape
-        self.voxel_data = np.packbits(V.ravel(order='F'))
-        LOGGER.info(f"END render_volume")
-        mem = MEMORY_USAGE(offset=mem0)
-        LOGGER.info(f"DELTA MEMORY USED: {mem/2**30:0.2f} GB")
-        LOGGER.info(40*"*")
+        LOGGER.info(f"{self.__class__.__name__} -> render_volume")
+        self.voxel_data = self.render_on_grid(self.grid)
+        rx, ry, rz = [int(r) for r in self.grid.res_vector]
+        self._voxel_shape = (rx, ry, rz)
         TIMING_END("render_volume")
         return self.voxel_data
 
@@ -480,22 +423,6 @@ class VoxelModel:
                              voxel_size=self.grid.voxel_size_vector)
         return TransformedModel(self, M4, M4inv, new_grid)
 
-    def render_on_grid(self, target_grid):
-        """Evaluate this model's geometry on an arbitrary target grid.
-
-        Returns a new VoxelModel with packed data on target_grid.
-        Uses evaluate_slice() for primitives/CSG, or _get_slice_for_coords()
-        for coordinate remapping of packed data models.
-        """
-        if self.voxel_data is not None and self.grid.same_grid(target_grid):
-            return VoxelModel(grid=target_grid, voxel_data=self.voxel_data,
-                              _voxel_shape=self._voxel_shape)
-        rx, ry, rz = target_grid.res_vector
-        V = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
-        for X_2d, Y_2d, z_val, k in target_grid.iter_slices():
-            V[:, :, k] = self._get_slice_for_coords(X_2d, Y_2d, z_val)
-        return VoxelModel(grid=target_grid, voxel_data=V)
-
     def _ensure_rendered(self):
         """Ensure voxel_data is populated (render if needed)."""
         if self.voxel_data is None:
@@ -509,83 +436,52 @@ class VoxelModel:
         return VoxelModel(grid=self.grid, voxel_data=packed,
                           _voxel_shape=self._voxel_shape)
 
-    def _compatible_grid_op(self, other, np_op):
-        """Tier 2: render both on union grid, then byte-level op."""
-        union_grid = self.grid | other.grid
-        left = self.render_on_grid(union_grid)
-        right = other.render_on_grid(union_grid)
-        packed = np_op(left.voxel_data, right.voxel_data)
-        return VoxelModel(grid=union_grid, voxel_data=packed,
-                          _voxel_shape=left._voxel_shape)
-
-    def __or__(self, other): #union
-        # Tier 1: same grid with existing data → byte-level
+    def __or__(self, other):
         if (self.voxel_data is not None and other.voxel_data is not None
                 and self.grid.same_grid(other.grid)):
             return self._same_grid_op(other, np.bitwise_or)
-        # Tier 2: compatible grids → render on union grid + byte-level
-        if self.grid.compatible_grid(other.grid):
-            return self._compatible_grid_op(other, np.bitwise_or)
-        # Tier 3: incompatible → CSGModel lazy evaluation
-        bounding_grid = self.grid | other.grid
-        return CSGModel(self, 'or', other, bounding_grid)
+        return CSGModel(self, 'or', other, self.grid | other.grid)
 
-    def __and__(self, other): #intersection
-        # Tier 1: same grid with existing data → byte-level
+    def __and__(self, other):
         if (self.voxel_data is not None and other.voxel_data is not None
                 and self.grid.same_grid(other.grid)):
             return self._same_grid_op(other, np.bitwise_and)
-        # Tier 2: compatible grids → render on union grid + byte-level
-        if self.grid.compatible_grid(other.grid):
-            return self._compatible_grid_op(other, np.bitwise_and)
-        # Tier 3: incompatible → CSGModel lazy evaluation
-        bounding_grid = self.grid & other.grid
-        return CSGModel(self, 'and', other, bounding_grid)
+        return CSGModel(self, 'and', other, self.grid & other.grid)
 
-    def __xor__(self, other): #exclusive or
-        # Tier 1: same grid with existing data → byte-level
+    def __xor__(self, other):
         if (self.voxel_data is not None and other.voxel_data is not None
                 and self.grid.same_grid(other.grid)):
             return self._same_grid_op(other, np.bitwise_xor)
-        # Tier 2: compatible grids → render on union grid + byte-level
-        if self.grid.compatible_grid(other.grid):
-            return self._compatible_grid_op(other, np.bitwise_xor)
-        # Tier 3: incompatible → CSGModel lazy evaluation
-        bounding_grid = self.grid | other.grid
-        return CSGModel(self, 'xor', other, bounding_grid)
+        return CSGModel(self, 'xor', other, self.grid | other.grid)
 
-    def __sub__(self, other): #difference
+    def __sub__(self, other):
         _sub_op = lambda a, b: np.bitwise_and(a, np.bitwise_not(b))
-        # Tier 1: same grid with existing data → byte-level
         if (self.voxel_data is not None and other.voxel_data is not None
                 and self.grid.same_grid(other.grid)):
             packed = _sub_op(self.voxel_data, other.voxel_data)
             return VoxelModel(grid=self.grid, voxel_data=packed,
                               _voxel_shape=self._voxel_shape)
-        # Tier 2: compatible grids → render on union grid + byte-level
-        if self.grid.compatible_grid(other.grid):
-            return self._compatible_grid_op(other, _sub_op)
-        # Tier 3: incompatible → CSGModel lazy evaluation
         return CSGModel(self, 'sub', other, self.grid)
 
-    def __invert__(self): #bitwise NOT
+    def __invert__(self):
         self._ensure_rendered()
         packed = np.bitwise_not(self.voxel_data)
         return VoxelModel(grid=self.grid, voxel_data=packed,
                           _voxel_shape=self._voxel_shape)
 
+
 class CSGModel(VoxelModel):
     """Lazy boolean combination — defers materialization until consumption.
 
-    Stores operand references and operation type without allocating
-    intermediate volumes. evaluate_slice() evaluates both children
-    per-slice and combines on the fly.
+    At render time, all leaves render on a common grid via render_on_grid(),
+    then results are combined with byte-level bitwise ops.
     """
-    _OP_MAP = {
-        'or':  lambda L, R: L | R,
-        'and': lambda L, R: L & R,
-        'xor': lambda L, R: L ^ R,
-        'sub': lambda L, R: L & ~R,
+
+    _BYTEWISE_OP_MAP = {
+        'or':  np.bitwise_or,
+        'and': np.bitwise_and,
+        'xor': np.bitwise_xor,
+        'sub': lambda a, b: np.bitwise_and(a, np.bitwise_not(b)),
     }
 
     def __init__(self, left, op, right, grid):
@@ -594,229 +490,93 @@ class CSGModel(VoxelModel):
         self.op = op
         self.right = right
 
-    def evaluate_slice(self, X_2d, Y_2d, z_val):
-        L = self.left._get_slice_for_coords(X_2d, Y_2d, z_val)
-        R = self.right._get_slice_for_coords(X_2d, Y_2d, z_val)
-        return self._OP_MAP[self.op](L, R)
-
-    def _collect_leaves(self, leaves: List[LeafNode], ops: List[Tuple[str, int, int]]) -> int:
-        """Recursively collect leaves and operations from this CSG tree.
-
-        Args:
-            leaves: List to append leaf nodes to
-            ops: List to append operations to (postfix order)
-
-        Returns:
-            Index of this node's result in the evaluation stack
-        """
-        # Process left subtree
+    def _collect_leaves(self, leaves, ops):
+        """Recursively collect leaf models and operations (postfix order)."""
         if isinstance(self.left, CSGModel):
             left_idx = self.left._collect_leaves(leaves, ops)
         else:
             left_idx = len(leaves)
-            leaves.append(self.left._classify_leaf())
+            leaves.append(LeafNode(self.left, self.left.grid))
 
-        # Process right subtree
         if isinstance(self.right, CSGModel):
             right_idx = self.right._collect_leaves(leaves, ops)
         else:
             right_idx = len(leaves)
-            leaves.append(self.right._classify_leaf())
+            leaves.append(LeafNode(self.right, self.right.grid))
 
-        # Record this operation (postfix: left, right, then op)
         result_idx = len(leaves) + len(ops)
         ops.append((self.op, left_idx, right_idx))
         return result_idx
 
-    def _plan_execution(self) -> ExecutionPlan:
-        """Analyze CSG tree and create an optimized execution plan.
-
-        Walks the tree to:
-        1. Collect all leaf nodes with their classifications
-        2. Record operations in postfix order
-        3. Determine if all leaves share compatible grids
-        4. Choose optimal execution strategy
-
-        Returns:
-            ExecutionPlan with leaves, operations, and strategy
-        """
+    def _plan_execution(self):
+        """Build execution plan: collect leaves, compute common grid."""
         plan = ExecutionPlan()
-
-        # Collect tree structure
         self._collect_leaves(plan.leaves, plan.operations)
-
         if not plan.leaves:
             return plan
-
-        # Check grid compatibility across all leaves
-        first_vs = plan.leaves[0].voxel_size
-        plan.all_compatible = all(
-            np.allclose(leaf.voxel_size, first_vs)
-            for leaf in plan.leaves
-        )
-
-        # Check if all leaves can use fused kernels
-        plan.all_fused_capable = all(
-            leaf.leaf_type in (LeafType.FUSED, LeafType.MATERIALIZED)
-            for leaf in plan.leaves
-        )
-
-        # Compute common grid if all compatible
-        if plan.all_compatible:
-            # Union of all leaf grids
-            union_grid = plan.leaves[0].grid
-            for leaf in plan.leaves[1:]:
-                union_grid = union_grid | leaf.grid
-            plan.common_grid = union_grid
-
-        # Determine execution strategy
-        if plan.all_compatible and plan.all_fused_capable:
-            plan.strategy = "fused_bytewise"
-        elif plan.all_compatible:
-            plan.strategy = "mixed"
-        else:
-            plan.strategy = "streaming"
-
+        # Common grid = union of all leaf grids
+        union_grid = plan.leaves[0].grid
+        for leaf in plan.leaves[1:]:
+            union_grid = union_grid | leaf.grid
+        plan.common_grid = union_grid
         return plan
 
-    def _classify_leaf(self) -> LeafNode:
-        """CSGModel is not a leaf — it's an internal node.
-
-        This should not be called on CSGModel directly, but if it is
-        (e.g., nested CSG that wasn't flattened), treat as fallback.
-        """
-        return LeafNode(self, LeafType.FALLBACK, self.grid)
-
-    # Byte-level operation map for packed arrays
-    _BYTEWISE_OP_MAP = {
-        'or':  np.bitwise_or,
-        'and': np.bitwise_and,
-        'xor': np.bitwise_xor,
-        'sub': lambda a, b: np.bitwise_and(a, np.bitwise_not(b)),
-    }
-
     def render_volume(self):
-        """Render CSG tree using query-planned execution.
-
-        Analyzes the tree structure and chooses optimal strategy:
-        - fused_bytewise/mixed: render leaves to common grid, combine with byte-level ops
-        - streaming: per-slice evaluation (fallback)
-        """
+        """Render CSG tree: all leaves on common grid, byte-level combination."""
         if self.voxel_data is not None:
             return self.voxel_data
 
         plan = self._plan_execution()
+        common_grid = plan.common_grid or self.grid
 
-        # Use optimized path when all leaves share compatible grids
-        if plan.strategy in ("fused_bytewise", "mixed") and plan.common_grid is not None:
-            return self._render_planned(plan)
+        TIMING_START("render_volume_csg")
 
-        # Fallback: streaming per-slice evaluation
-        return self._render_streaming()
-
-    def _render_planned(self, plan: ExecutionPlan):
-        """Execute CSG tree using query plan with byte-level combination.
-
-        Renders all leaves onto the common grid, then applies operations
-        in postfix order using byte-level bitwise ops on packed arrays.
-        """
-        TIMING_START("render_volume_planned")
-        common_grid = plan.common_grid
-
-        # Render all leaves onto the common grid
+        # Render all leaves onto common grid
         rendered = []
         for leaf in plan.leaves:
-            vm = leaf.model.render_on_grid(common_grid)
-            rendered.append(vm.voxel_data)
+            if isinstance(leaf.model, TransformedModel):
+                packed = leaf.model.source.render_on_grid(common_grid, leaf.model.M4inv)
+            else:
+                packed = leaf.model.render_on_grid(common_grid)
+            rendered.append(packed)
 
-        # Apply operations in postfix order
-        # Stack holds intermediate results (packed arrays)
-        stack = list(rendered)  # Start with leaf results
-
+        # Postfix combination with byte-level ops
+        stack = list(rendered)
         for op, left_idx, right_idx in plan.operations:
-            left_data = stack[left_idx]
-            right_data = stack[right_idx]
-            result = self._BYTEWISE_OP_MAP[op](left_data, right_data)
+            result = self._BYTEWISE_OP_MAP[op](stack[left_idx], stack[right_idx])
             stack.append(result)
 
-        # Final result is the last item on the stack
         self.voxel_data = stack[-1]
-        self._voxel_shape = (int(common_grid.res_vector[0]),
-                             int(common_grid.res_vector[1]),
-                             int(common_grid.res_vector[2]))
+        self._voxel_shape = tuple(int(r) for r in common_grid.res_vector)
         self.grid = common_grid
-        TIMING_END("render_volume_planned")
-        return self.voxel_data
-
-    def _render_streaming(self):
-        """Fallback: render using per-slice streaming evaluation."""
-        TIMING_START("render_volume_streaming")
-        if self.grid is None:
-            raise ValueError("CSGModel requires a grid")
-        rx, ry, rz = self.grid.res_vector
-        V = np.zeros((int(rx), int(ry), int(rz)), dtype='bool')
-        for X_2d, Y_2d, z_val, k in self.grid.iter_slices():
-            V[:, :, k] = self.evaluate_slice(X_2d, Y_2d, z_val)
-        self._voxel_shape = V.shape
-        self.voxel_data = np.packbits(V.ravel(order='F'))
-        TIMING_END("render_volume_streaming")
+        TIMING_END("render_volume_csg")
         return self.voxel_data
 
 
 class TransformedModel(VoxelModel):
-    """Lazy affine transform — defers materialization until consumption.
+    """Lazy affine transform — thin wrapper passing M4inv to source.
 
-    Uses 4x4 homogeneous matrices for full affine transforms (rotation,
-    scale, translation, and arbitrary compositions). Chained transforms
-    compose into a single matrix pair.
+    Uses 4x4 homogeneous matrices for full affine transforms.
+    Chained transforms compose into a single matrix pair.
     """
 
     def __init__(self, source, M4, M4inv, grid):
         super().__init__(grid=grid)
         self.source = source
-        self.M4 = M4        # 4x4 forward transform
-        self.M4inv = M4inv  # 4x4 inverse transform
+        self.M4 = M4
+        self.M4inv = M4inv
 
-    def evaluate_slice(self, X_2d, Y_2d, z_val):
-        """Evaluate by inverse-transforming coordinates into source space.
-
-        If source has evaluate_at_coords(), evaluates geometry directly
-        at inverse-transformed coordinates (no intermediate volume).
-        Otherwise falls back to rendering source and indexing.
-        """
-        Minv = self.M4inv
-        Z_2d = np.full_like(X_2d, z_val)
-
-        # Inverse transform: target coords → source coords
-        X_orig = Minv[0,0]*X_2d + Minv[0,1]*Y_2d + Minv[0,2]*Z_2d + Minv[0,3]
-        Y_orig = Minv[1,0]*X_2d + Minv[1,1]*Y_2d + Minv[1,2]*Z_2d + Minv[1,3]
-        Z_orig = Minv[2,0]*X_2d + Minv[2,1]*Y_2d + Minv[2,2]*Z_2d + Minv[2,3]
-
-        # If source can evaluate at arbitrary coords, use it directly
-        if self.source._has_evaluate_at_coords():
-            return self.source.evaluate_at_coords(X_orig, Y_orig, Z_orig)
-
-        # Fallback: render source and index into packed data
-        if self.source.voxel_data is None:
-            self.source.render_volume()
-        V_src = self.source._unpack_volume()
-        src_rx, src_ry, src_rz = self.source.grid.res_vector
-        sx0, sx1 = self.source.grid.xlim
-        sy0, sy1 = self.source.grid.ylim
-        sz0, sz1 = self.source.grid.zlim
-        I = np.floor(src_rx * (X_orig - sx0) / (sx1 - sx0)).astype('int')
-        J = np.floor(src_ry * (Y_orig - sy0) / (sy1 - sy0)).astype('int')
-        K = np.floor(src_rz * (Z_orig - sz0) / (sz1 - sz0)).astype('int')
-        valid = (I >= 0) & (I < src_rx) & (J >= 0) & (J < src_ry) & (K >= 0) & (K < src_rz)
-        I_safe = np.where(valid, I, 0)
-        J_safe = np.where(valid, J, 0)
-        K_safe = np.where(valid, K, 0)
-        return np.where(valid, V_src[I_safe, J_safe, K_safe], False)
+    def render_volume(self):
+        """Delegate to source with inverse transform."""
+        if self.voxel_data is not None:
+            return self.voxel_data
+        self.voxel_data = self.source.render_on_grid(self.grid, self.M4inv)
+        self._voxel_shape = tuple(int(r) for r in self.grid.res_vector)
+        return self.voxel_data
 
     def _transform_corners(self, source, M4):
         """Compute new bounding grid from transformed source corners."""
         C = source.grid.compute_box_corner_vectors()
-        # Apply 4x4 to homogeneous coordinates
         Ch = np.hstack([C, np.ones((C.shape[0], 1))])
         Ct = (M4 @ Ch.T).T[:, :3]
         xlim = (Ct[:,0].min(), Ct[:,0].max())
@@ -846,17 +606,6 @@ class TransformedModel(VoxelModel):
         composed_M4inv = self.M4inv @ Tinv
         new_grid = self._transform_corners(self.source, composed_M4)
         return TransformedModel(self.source, composed_M4, composed_M4inv, new_grid)
-
-    def _classify_leaf(self) -> LeafNode:
-        """Classify TransformedModel based on source's evaluation capability.
-
-        If source has evaluate_at_coords(), TransformedModel can evaluate
-        directly without intermediate volume → promotes to FUSED.
-        Otherwise remains FALLBACK (requires source render + index).
-        """
-        if self.source._has_evaluate_at_coords():
-            return LeafNode(self, LeafType.FUSED, self.grid)
-        return LeafNode(self, LeafType.FALLBACK, self.grid)
 
 
 def union_all(models):

@@ -3,7 +3,7 @@ import numpy as np
 from voxelcad import Cube, Sphere, Cylinder, GyroidCube
 from voxelcad.voxel_model import VoxelModel, CSGModel, TransformedModel
 from voxelcad.voxel_grid import VoxelGrid
-from voxelcad._kernels import CYTHON_AVAILABLE
+import voxelcad.environment as ENV
 
 # Low resolution for fast tests — 32^3 grid on size=10 objects
 LOW_RES_VS = 10.0 / 32

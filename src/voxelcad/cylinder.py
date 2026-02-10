@@ -1,8 +1,10 @@
 import numpy as np
 
+import voxelcad.environment as ENV
+
 from voxelcad.voxel_model import VoxelModel
 from voxelcad.voxel_grid  import VoxelGrid
-from voxelcad._kernels import CYTHON_AVAILABLE, evaluate_and_pack_cylinder
+from voxelcad._kernels import evaluate_and_pack_cylinder
 
 from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED, TIMING_START, TIMING_END
 
@@ -40,51 +42,46 @@ class Cylinder(VoxelModel):
                                   zlim=(0,sz),
                                   voxel_size=voxel_size)
 
-    def evaluate_slice(self, X_2d, Y_2d, z_val):
-        cx,cy,cz = self.grid.compute_center_vector()
-        Xc = X_2d - cx
-        Yc = Y_2d - cy
-        Zc = z_val - cz
-        h = self.h
-        r1 = self.r1
-        r2 = self.r2
-        #parameterize Z: 0 at -h/2, 1 at h/2
-        Pz = Zc/h + 0.5
-        #interpolate radii along Z
-        R = r1*(1.0-Pz) + r2*Pz
-        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
-        return (Xc**2 + Yc**2 <= R**2) & ((0.0 <= Pz) & (Pz <= 1.0))
-
-    def evaluate_at_coords(self, X, Y, Z):
-        """Evaluate cylinder geometry at arbitrary coordinates."""
-        cx,cy,cz = self.grid.compute_center_vector()
-        Xc = X - cx
-        Yc = Y - cy
-        Zc = Z - cz
-        h = self.h
-        r1 = self.r1
-        r2 = self.r2
-        Pz = Zc/h + 0.5
-        R = r1*(1.0-Pz) + r2*Pz
-        return (Xc**2 + Yc**2 <= R**2) & ((0.0 <= Pz) & (Pz <= 1.0))
-
-    def _is_fused_capable(self):
-        """Cylinder has a Cython fused kernel when available."""
-        return CYTHON_AVAILABLE and evaluate_and_pack_cylinder is not None
-
-    def render_volume(self):
-        if not CYTHON_AVAILABLE:
-            return super().render_volume()
-        TIMING_START("render_volume")
-        xcc, ycc, zcc = self.grid.compute_cell_center_ranges()
+    def _render_cython(self, grid, M4inv=None):
+        """Cython fused evaluate-and-pack for cylinder geometry."""
+        if evaluate_and_pack_cylinder is None or M4inv is not None:
+            return self._render_numpy(grid, M4inv)
+        TIMING_START("cylinder_render_cython")
+        xcc, ycc, zcc = grid.compute_cell_center_ranges()
         cx, cy, cz = self.grid.compute_center_vector()
-        self.voxel_data = evaluate_and_pack_cylinder(
+        result = evaluate_and_pack_cylinder(
             xcc, ycc, zcc, cx, cy, cz,
             self.h, self.r1, self.r2,
         )
-        self._voxel_shape = (len(xcc), len(ycc), len(zcc))
-        TIMING_END("render_volume")
-        return self.voxel_data
+        TIMING_END("cylinder_render_cython")
+        return result
+
+    def _render_numpy(self, grid, M4inv=None):
+        """NumPy per-slice geometry evaluation for cylinder."""
+        TIMING_START("cylinder_render_numpy")
+        cx, cy, cz = self.grid.compute_center_vector()
+        h = self.h
+        r1 = self.r1
+        r2 = self.r2
+        rx, ry, rz = [int(r) for r in grid.res_vector]
+        V = np.zeros((rx, ry, rz), dtype='bool')
+        for X_2d, Y_2d, z_val, k in grid.iter_slices():
+            if M4inv is not None:
+                Z_2d = np.full_like(X_2d, z_val)
+                Xp = M4inv[0,0]*X_2d + M4inv[0,1]*Y_2d + M4inv[0,2]*Z_2d + M4inv[0,3]
+                Yp = M4inv[1,0]*X_2d + M4inv[1,1]*Y_2d + M4inv[1,2]*Z_2d + M4inv[1,3]
+                Zp = M4inv[2,0]*X_2d + M4inv[2,1]*Y_2d + M4inv[2,2]*Z_2d + M4inv[2,3]
+            else:
+                Xp, Yp, Zp = X_2d, Y_2d, z_val
+            Xc = Xp - cx
+            Yc = Yp - cy
+            Zc = Zp - cz
+            Pz = Zc/h + 0.5
+            R = r1*(1.0-Pz) + r2*Pz
+            V[:, :, k] = (Xc**2 + Yc**2 <= R**2) & ((0.0 <= Pz) & (Pz <= 1.0))
+        result = np.packbits(V.ravel(order='F'))
+        TIMING_END("cylinder_render_numpy")
+        return result
 
 ################################################################################
 # TEST CODE

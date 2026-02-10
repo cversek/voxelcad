@@ -4,7 +4,7 @@ import voxelcad.environment as ENV
 
 from voxelcad.voxel_model import VoxelModel
 from voxelcad.voxel_grid  import VoxelGrid
-from voxelcad._kernels import CYTHON_AVAILABLE, evaluate_and_pack_sphere
+from voxelcad._kernels import evaluate_and_pack_sphere
 
 from voxelcad.debug import TIMING_START, TIMING_END
 
@@ -19,33 +19,38 @@ class Sphere(VoxelModel):
                               zlim=(-sz,sz),
                               voxel_size=voxel_size)
 
-    def evaluate_slice(self, X_2d, Y_2d, z_val):
-        r = self.r
-        cx,cy,cz = self.grid.compute_center_vector()
-        return ((X_2d-cx)**2 + (Y_2d-cy)**2 + (z_val-cz)**2 <= r**2)
-
-    def evaluate_at_coords(self, X, Y, Z):
-        """Evaluate sphere geometry at arbitrary coordinates."""
-        r = self.r
-        cx,cy,cz = self.grid.compute_center_vector()
-        return ((X-cx)**2 + (Y-cy)**2 + (Z-cz)**2 <= r**2)
-
-    def _is_fused_capable(self):
-        """Sphere has a Cython fused kernel when available."""
-        return CYTHON_AVAILABLE and evaluate_and_pack_sphere is not None
-
-    def render_volume(self):
-        if not CYTHON_AVAILABLE:
-            return super().render_volume()
-        TIMING_START("render_volume")
-        xcc, ycc, zcc = self.grid.compute_cell_center_ranges()
+    def _render_cython(self, grid, M4inv=None):
+        """Cython fused evaluate-and-pack for sphere geometry."""
+        if evaluate_and_pack_sphere is None or M4inv is not None:
+            return self._render_numpy(grid, M4inv)
+        TIMING_START("sphere_render_cython")
+        xcc, ycc, zcc = grid.compute_cell_center_ranges()
         cx, cy, cz = self.grid.compute_center_vector()
-        self.voxel_data = evaluate_and_pack_sphere(
+        result = evaluate_and_pack_sphere(
             xcc, ycc, zcc, cx, cy, cz, self.r ** 2,
         )
-        self._voxel_shape = (len(xcc), len(ycc), len(zcc))
-        TIMING_END("render_volume")
-        return self.voxel_data
+        TIMING_END("sphere_render_cython")
+        return result
+
+    def _render_numpy(self, grid, M4inv=None):
+        """NumPy per-slice geometry evaluation for sphere."""
+        TIMING_START("sphere_render_numpy")
+        cx, cy, cz = self.grid.compute_center_vector()
+        r_sq = self.r ** 2
+        rx, ry, rz = [int(r) for r in grid.res_vector]
+        V = np.zeros((rx, ry, rz), dtype='bool')
+        for X_2d, Y_2d, z_val, k in grid.iter_slices():
+            if M4inv is not None:
+                Z_2d = np.full_like(X_2d, z_val)
+                Xp = M4inv[0,0]*X_2d + M4inv[0,1]*Y_2d + M4inv[0,2]*Z_2d + M4inv[0,3]
+                Yp = M4inv[1,0]*X_2d + M4inv[1,1]*Y_2d + M4inv[1,2]*Z_2d + M4inv[1,3]
+                Zp = M4inv[2,0]*X_2d + M4inv[2,1]*Y_2d + M4inv[2,2]*Z_2d + M4inv[2,3]
+            else:
+                Xp, Yp, Zp = X_2d, Y_2d, z_val
+            V[:, :, k] = ((Xp-cx)**2 + (Yp-cy)**2 + (Zp-cz)**2 <= r_sq)
+        result = np.packbits(V.ravel(order='F'))
+        TIMING_END("sphere_render_numpy")
+        return result
 
 ################################################################################
 # TEST CODE

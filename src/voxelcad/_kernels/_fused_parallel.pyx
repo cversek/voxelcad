@@ -633,3 +633,90 @@ def evaluate_and_pack_hyperwiggly_gyroid(
                     set_bit(out, lin_idx)
 
     return packed
+
+
+# ---------------------------------------------------------------------------
+# Resample-and-pack kernel (data-only models: nearest-neighbor lookup)
+# ---------------------------------------------------------------------------
+
+def resample_and_pack(
+    double[::1] src_x, double[::1] src_y, double[::1] src_z,
+    unsigned char[::1] src_packed,
+    long long src_rx, long long src_ry, long long src_rz,
+    double[::1] dst_x, double[::1] dst_y, double[::1] dst_z,
+    double[:, ::1] M4inv=None,
+    int n_threads=0,
+):
+    """Fused nearest-neighbor resample + bit-pack for data-only VoxelModels.
+
+    Looks up each destination voxel in the source packed array via
+    nearest-neighbor indexing. Handles optional M4inv transform.
+
+    Args:
+        src_x, src_y, src_z: 1D source grid coordinate arrays
+        src_packed: source packed uint8 array (F-order)
+        src_rx, src_ry, src_rz: source grid resolution
+        dst_x, dst_y, dst_z: 1D destination grid coordinate arrays
+        M4inv: optional 4x4 inverse transform matrix
+        n_threads: OpenMP threads (0 = auto-detect)
+
+    Returns:
+        np.ndarray[uint8]: packed boolean array (F-order)
+    """
+    cdef int drx = dst_x.shape[0]
+    cdef int dry = dst_y.shape[0]
+    cdef int drz = dst_z.shape[0]
+    cdef long long total_bits = <long long>drx * <long long>dry * <long long>drz
+    cdef long long total_bytes = (total_bits + 7) >> 3
+    cdef long long slice_bits = <long long>drx * <long long>dry
+    cdef long long src_slice_bits = src_rx * src_ry
+
+    packed = np.zeros(total_bytes, dtype=np.uint8)
+    cdef unsigned char[::1] out_view = packed
+    cdef unsigned char *out = &out_view[0]
+    cdef unsigned char *src = &src_packed[0]
+
+    cdef double src_x0 = src_x[0]
+    cdef double src_y0 = src_y[0]
+    cdef double src_z0 = src_z[0]
+    cdef double src_dx = src_x[1] - src_x[0] if src_rx > 1 else 1.0
+    cdef double src_dy = src_y[1] - src_y[0] if src_ry > 1 else 1.0
+    cdef double src_dz = src_z[1] - src_z[0] if src_rz > 1 else 1.0
+    cdef int has_transform = M4inv is not None
+
+    cdef int i, j, k
+    cdef long long lin_idx, src_lin
+    cdef long long si, sj, sk
+    cdef double x, y, z, xp, yp, zp
+    cdef int actual_threads
+
+    if n_threads <= 0:
+        n_threads = _get_optimal_threads(drz)
+    actual_threads = n_threads if (slice_bits % 8 == 0) else 1
+
+    for k in prange(drz, nogil=True, num_threads=actual_threads, schedule='static'):
+        z = dst_z[k]
+        for j in range(dry):
+            y = dst_y[j]
+            for i in range(drx):
+                x = dst_x[i]
+                if has_transform:
+                    xp = M4inv[0,0]*x + M4inv[0,1]*y + M4inv[0,2]*z + M4inv[0,3]
+                    yp = M4inv[1,0]*x + M4inv[1,1]*y + M4inv[1,2]*z + M4inv[1,3]
+                    zp = M4inv[2,0]*x + M4inv[2,1]*y + M4inv[2,2]*z + M4inv[2,3]
+                else:
+                    xp = x
+                    yp = y
+                    zp = z
+                # Nearest-neighbor index in source grid
+                si = <long long>((xp - src_x0) / src_dx + 0.5)
+                sj = <long long>((yp - src_y0) / src_dy + 0.5)
+                sk = <long long>((zp - src_z0) / src_dz + 0.5)
+                # Bounds check + bit lookup in F-order packed array
+                if 0 <= si < src_rx and 0 <= sj < src_ry and 0 <= sk < src_rz:
+                    src_lin = si + sj * src_rx + sk * src_slice_bits
+                    if (src[src_lin >> 3] >> (7 - <int>(src_lin & 7))) & 1:
+                        lin_idx = i + j * drx + k * slice_bits
+                        set_bit(out, lin_idx)
+
+    return packed

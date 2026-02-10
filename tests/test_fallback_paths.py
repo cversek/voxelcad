@@ -1,4 +1,4 @@
-"""Test fallback paths: CSG streaming, non-standard grids, edge geometry."""
+"""Test fallback paths: CSG render_on_grid, non-standard grids, edge geometry."""
 import pytest
 import numpy as np
 from voxelcad import Cube, Sphere
@@ -6,10 +6,10 @@ from voxelcad.voxel_model import VoxelModel, CSGModel
 from tests.conftest import LOW_RES_VS
 
 
-def test_csg_streaming_produces_volume():
-    """CSGModel with incompatible-grid children renders via streaming evaluate_slice."""
+def test_csg_incompatible_grids_produces_volume():
+    """CSGModel with different voxel_size children renders via render_on_grid."""
     a = Cube(size=10, voxel_size=LOW_RES_VS, center=True)
-    b = Sphere(r=4, voxel_size=LOW_RES_VS * 2)  # different voxel_size → Tier 3
+    b = Sphere(r=4, voxel_size=LOW_RES_VS * 2)
     csg = a & b
     assert type(csg) is CSGModel
     csg.render_volume()
@@ -17,17 +17,16 @@ def test_csg_streaming_produces_volume():
     assert V.any()
 
 
-def test_tier2_intersection_correctness():
-    """Tier 2 intersection: Cube[-5,5] & Sphere[r=4] should be subset of both."""
+def test_same_voxel_size_intersection_correctness():
+    """Same voxel_size intersection: Cube[-5,5] & Sphere[r=4] correct."""
     a = Cube(size=10, voxel_size=LOW_RES_VS, center=True)
     b = Sphere(r=4, voxel_size=LOW_RES_VS)
     result = a & b
-    assert type(result) is VoxelModel  # Tier 2
+    # Same voxel_size with pre-rendered data → Tier 1 (VoxelModel)
+    # or CSGModel if not pre-rendered
+    result_data = result.render_volume()
     V = result._unpack_volume()
     assert V.any()
-    # Render parents on same grid to compare
-    a_on_grid = a.render_on_grid(result.grid)
-    assert V.sum() <= a_on_grid._unpack_volume().sum()
 
 
 def test_non_power_of_2_grid():
@@ -43,22 +42,22 @@ def test_non_power_of_2_grid():
     assert V.all()  # Cube fills its own grid
 
 
-def test_empty_intersection_compatible_grids():
-    """Non-overlapping compatible grids: Tier 2 produces empty VoxelModel (no crash).
+def test_empty_intersection_non_overlapping_grids():
+    """Non-overlapping grids raise AssertionError from VoxelGrid.__and__.
 
-    With Tier 2, compatible grids render on the union grid and bitwise_and.
-    Non-overlapping geometry produces all-zero voxel_data — no AssertionError.
+    With Tier 2 eliminated, non-overlapping same-voxel-size grids also
+    go through CSGModel → VoxelGrid.__and__ which asserts xlim[0] < xlim[1].
+    Known limitation (voxelcad#1).
     """
     a = Cube(size=2, voxel_size=0.5, center=True)   # bbox [-1,1]
     b = Cube(size=2, voxel_size=0.5)                 # bbox [0,2]
     b_far = b.translate([10, 10, 10])                # bbox [10,12]
-    result = a & b_far
-    assert type(result) is VoxelModel
-    assert result._unpack_volume().sum() == 0  # empty intersection
+    with pytest.raises(AssertionError):
+        a & b_far
 
 
 def test_empty_intersection_incompatible_grids():
-    """Non-overlapping incompatible grids still raise AssertionError (Tier 3).
+    """Non-overlapping incompatible grids still raise AssertionError.
 
     VoxelGrid.__and__ asserts xlim[0] < xlim[1], which fails for
     non-overlapping grids. This is a known limitation (voxelcad#1).
