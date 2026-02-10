@@ -67,7 +67,7 @@ class TestUnifiedInterface:
             result = p._render_numpy(p.grid)
             assert isinstance(result, np.ndarray)
             assert result.dtype == np.uint8
-            assert np.unpackbits(result).sum() > 0, f"{type(p).__name__} produced empty result"
+            assert np.unpackbits(result, bitorder='big').sum() > 0, f"{type(p).__name__} produced empty result"
 
     def test_render_on_grid_with_foreign_grid(self):
         """Primitive can render on a different (foreign) grid."""
@@ -77,7 +77,7 @@ class TestUnifiedInterface:
         foreign = VoxelGrid(xlim=(-5, 5), ylim=(-5, 5), zlim=(-5, 5), voxel_size=VS)
         result = s.render_on_grid(foreign)
         assert isinstance(result, np.ndarray)
-        assert np.unpackbits(result).sum() > 0
+        assert np.unpackbits(result, bitorder='big').sum() > 0
 
 
 class TestQueryPlannerTreeWalk:
@@ -181,8 +181,8 @@ class TestCSGRenderVolume:
             csg.render_volume()
             s_alone = Sphere(r=3, voxel_size=VS * 2)
             s_alone.render_volume()
-            csg_sum = np.unpackbits(csg.voxel_data).sum()
-            s_sum = np.unpackbits(s_alone.voxel_data).sum()
+            csg_sum = np.unpackbits(csg.voxel_data, bitorder='big').sum()
+            s_sum = np.unpackbits(s_alone.voxel_data, bitorder='big').sum()
             assert abs(csg_sum - s_sum) / max(s_sum, 1) < 0.1
 
     def test_depth_2_csg_renders(self):
@@ -194,7 +194,7 @@ class TestCSGRenderVolume:
         if isinstance(csg, CSGModel):
             csg.render_volume()
             assert csg.voxel_data is not None
-            assert np.unpackbits(csg.voxel_data).sum() > 0
+            assert np.unpackbits(csg.voxel_data, bitorder='big').sum() > 0
 
     def test_idempotent_render(self):
         """Calling render_volume() twice returns same data."""
@@ -215,4 +215,4 @@ class TestCSGRenderVolume:
         if isinstance(csg, CSGModel):
             csg.render_volume()
             assert csg.voxel_data is not None
-            assert np.unpackbits(csg.voxel_data).sum() > 0
+            assert np.unpackbits(csg.voxel_data, bitorder='big').sum() > 0

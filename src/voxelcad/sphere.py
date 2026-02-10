@@ -48,7 +48,7 @@ class Sphere(VoxelModel):
             else:
                 Xp, Yp, Zp = X_2d, Y_2d, z_val
             V[:, :, k] = ((Xp-cx)**2 + (Yp-cy)**2 + (Zp-cz)**2 <= r_sq)
-        result = np.packbits(V.ravel(order='F'))
+        result = np.packbits(V.ravel(order='F'), bitorder='big')
         TIMING_END("sphere_render_numpy")
         return result
 

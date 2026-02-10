@@ -60,7 +60,7 @@ class Cube(VoxelModel):
             V[:, :, k] = ((np.abs(Xp-cx) <= hsx) &
                           (np.abs(Yp-cy) <= hsy) &
                           (np.abs(Zp-cz) <= hsz))
-        result = np.packbits(V.ravel(order='F'))
+        result = np.packbits(V.ravel(order='F'), bitorder='big')
         TIMING_END("cube_render_numpy")
         return result
 

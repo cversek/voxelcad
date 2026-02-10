@@ -84,7 +84,7 @@ class GyroidCube(Cube):
                         (np.abs(Yp-cy) <= hsy) &
                         (np.abs(Zp-cz) <= hsz))
             V[:, :, k] = Vslice
-        result = np.packbits(V.ravel(order='F'))
+        result = np.packbits(V.ravel(order='F'), bitorder='big')
         TIMING_END("gyroid_render_numpy")
         return result
 
@@ -163,7 +163,7 @@ class WigglyGyroidCube(GyroidCube):
                         (np.abs(Yp-cy) <= hsy) &
                         (np.abs(Zp-cz) <= hsz))
             V[:, :, k] = Vslice
-        result = np.packbits(V.ravel(order='F'))
+        result = np.packbits(V.ravel(order='F'), bitorder='big')
         TIMING_END("wiggly_gyroid_render_numpy")
         return result
 
@@ -243,7 +243,7 @@ class HyperWigglyGyroidCube(GyroidCube):
                         (np.abs(Yp-cy) <= hsy) &
                         (np.abs(Zp-cz) <= hsz))
             V[:, :, k] = Vslice
-        result = np.packbits(V.ravel(order='F'))
+        result = np.packbits(V.ravel(order='F'), bitorder='big')
         TIMING_END("hyperwiggly_gyroid_render_numpy")
         return result
 

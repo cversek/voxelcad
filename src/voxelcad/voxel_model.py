@@ -49,7 +49,7 @@ class VoxelModel:
         # Auto-pack bool arrays for 8x storage reduction (F-order: Z-slices contiguous)
         if voxel_data is not None and voxel_data.dtype == np.bool_:
             self._voxel_shape = voxel_data.shape
-            self.voxel_data = np.packbits(voxel_data.ravel(order='F'))
+            self.voxel_data = np.packbits(voxel_data.ravel(order='F'), bitorder='big')
         else:
             self.voxel_data   = voxel_data
             self._voxel_shape = _voxel_shape
@@ -61,7 +61,7 @@ class VoxelModel:
     def _unpack_volume(self):
         """Unpack stored uint8 data back to bool array with original shape (F-order)."""
         n = int(np.prod(self._voxel_shape))
-        return np.unpackbits(self.voxel_data)[:n].reshape(self._voxel_shape, order='F').view(np.bool_)
+        return np.unpackbits(self.voxel_data, bitorder='big')[:n].reshape(self._voxel_shape, order='F').view(np.bool_)
 
     def _unpack_slice(self, k):
         """Extract a single Z-slice from packed storage (F-order: Z-slices contiguous).
@@ -77,7 +77,7 @@ class VoxelModel:
         start = k * slice_size
         byte_start = start // 8
         byte_end = (start + slice_size + 7) // 8
-        bits = np.unpackbits(self.voxel_data[byte_start:byte_end])
+        bits = np.unpackbits(self.voxel_data[byte_start:byte_end], bitorder='big')
         bit_offset = start - byte_start * 8
         return bits[bit_offset:bit_offset + slice_size].reshape(rx, ry, order='F').view(np.bool_)
 
@@ -109,6 +109,13 @@ class VoxelModel:
         """
         from voxelcad._kernels import resample_and_pack
         if resample_and_pack is None:
+            import warnings
+            if ENV.use_cython:
+                warnings.warn(
+                    "ENV.use_cython=True but Cython resample_and_pack kernel is not "
+                    "available. Falling back to NumPy resampling. Build Cython "
+                    "extensions with: python setup.py build_ext --inplace",
+                    RuntimeWarning, stacklevel=3)
             return self._render_numpy(grid, M4inv)
         src_data = self.render_volume()
         src_rx, src_ry, src_rz = [int(r) for r in self.grid.res_vector]
@@ -154,14 +161,14 @@ class VoxelModel:
             J_safe = np.where(valid, J, 0)
             K_safe = np.where(valid, K_idx, 0)
 
-            # Bit lookup in F-order packed array
+            # Bit lookup in F-order packed array (MSB-first, matching np.packbits)
             lin_idx = I_safe + J_safe * src_rx + K_safe * src_rx * src_ry
             byte_idx = lin_idx >> 3
-            bit_idx = lin_idx & 7
+            bit_idx = 7 - (lin_idx & 7)
             bits = (src_data[byte_idx] >> bit_idx) & 1
             V[:, :, k] = np.where(valid, bits.astype(bool), False)
 
-        return np.packbits(V.ravel(order='F'))
+        return np.packbits(V.ravel(order='F'), bitorder='big')
 
     def render_volume(self):
         """Render on own grid and cache. Returns packed uint8."""

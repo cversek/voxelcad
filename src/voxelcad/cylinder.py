@@ -79,7 +79,7 @@ class Cylinder(VoxelModel):
             Pz = Zc/h + 0.5
             R = r1*(1.0-Pz) + r2*Pz
             V[:, :, k] = (Xc**2 + Yc**2 <= R**2) & ((0.0 <= Pz) & (Pz <= 1.0))
-        result = np.packbits(V.ravel(order='F'))
+        result = np.packbits(V.ravel(order='F'), bitorder='big')
         TIMING_END("cylinder_render_numpy")
         return result
 
