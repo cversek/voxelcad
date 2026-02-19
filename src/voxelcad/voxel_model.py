@@ -133,9 +133,14 @@ class VoxelModel:
         """
         src_data = self.render_volume()  # ensure source is materialized
         src_rx, src_ry, src_rz = [int(r) for r in self.grid.res_vector]
-        sx0, sx1 = self.grid.xlim
-        sy0, sy1 = self.grid.ylim
-        sz0, sz1 = self.grid.zlim
+        # Use cell centers + spacing (matches Cython resample_and_pack)
+        src_xcc, src_ycc, src_zcc = self.grid.compute_cell_center_ranges()
+        src_x0 = float(src_xcc[0])
+        src_y0 = float(src_ycc[0])
+        src_z0 = float(src_zcc[0])
+        src_dx = float(src_xcc[1] - src_xcc[0]) if src_rx > 1 else 1.0
+        src_dy = float(src_ycc[1] - src_ycc[0]) if src_ry > 1 else 1.0
+        src_dz = float(src_zcc[1] - src_zcc[0]) if src_rz > 1 else 1.0
 
         dst_rx, dst_ry, dst_rz = [int(r) for r in grid.res_vector]
         V = np.zeros((dst_rx, dst_ry, dst_rz), dtype='bool')
@@ -150,10 +155,11 @@ class VoxelModel:
                 Xp, Yp = X_2d, Y_2d
                 Zp = np.full_like(X_2d, z_val)
 
-            # Nearest-neighbor index into source grid
-            I = np.floor(src_rx * (Xp - sx0) / (sx1 - sx0)).astype('int')
-            J = np.floor(src_ry * (Yp - sy0) / (sy1 - sy0)).astype('int')
-            K_idx = np.floor(src_rz * (Zp - sz0) / (sz1 - sz0)).astype('int')
+            # Nearest-neighbor index into source grid (cell-center-based,
+            # matches Cython resample_and_pack: (long long)((x-x0)/dx + 0.5))
+            I = np.floor((Xp - src_x0) / src_dx + 0.5).astype('int')
+            J = np.floor((Yp - src_y0) / src_dy + 0.5).astype('int')
+            K_idx = np.floor((Zp - src_z0) / src_dz + 0.5).astype('int')
             valid = ((I >= 0) & (I < src_rx) &
                      (J >= 0) & (J < src_ry) &
                      (K_idx >= 0) & (K_idx < src_rz))
