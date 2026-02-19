@@ -8,9 +8,9 @@ Support for mathematically defined volume structures is emphasized, setting this
 
 | Sphere | Gyroid Cube | Gyroid & Cylinder | Cube - Sphere |
 |--------|-------------|-------------------|---------------|
-| ![](images/sphere_128.png) | ![](images/gyroid_cube_128.png) | ![](images/gyroid_and_cylinder_128.png) | ![](images/cube_minus_sphere_128.png) |
+| ![](images/sphere_256.png) | ![](images/gyroid_cube_256.png) | ![](images/gyroid_and_cylinder_256.png) | ![](images/cube_minus_sphere_256.png) |
 
-All renders produced with PyVista offscreen at resolution 128.
+All renders produced with PyVista offscreen at resolution 256.
 
 ## Performance
 
@@ -26,18 +26,18 @@ Cython kernels stream one voxel at a time, reducing memory from ~4.6 GB (NumPy v
 
 ## Quick Start: Ice Cream Cone Demo
 
-The `examples/ice_cream_cone_demo.ipynb` notebook demonstrates the full VoxelCAD pipeline:
+The `examples/ice_cream_cone_demo.ipynb` notebook demonstrates the full VoxelCAD pipeline — CSG booleans, coordinate transforms, and mesh export in a few lines:
+
+<img src="images/ice_cream_256.png" alt="ice cream cone CSG demo" width="400"/>
 
 ```python
-from voxelcad import Sphere, Cylinder, GyroidCube
+from voxelcad import Sphere, Cylinder
 
-# CSG operations with Python operators
 scoop = Sphere(3)
-cone = Cylinder(h=8, r1=3, r2=0.5)
+cone = Cylinder(h=8, r1=3, r2=0.3)
 scoop_up = scoop.translate([0, 0, 4])
 ice_cream = scoop_up | cone
 
-# Render and export
 ice_cream.plot()
 ice_cream.export("ice_cream.stl")
 ```
