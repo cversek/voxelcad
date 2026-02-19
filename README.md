@@ -28,7 +28,7 @@ Cython kernels stream one voxel at a time, reducing memory from ~4.6 GB (NumPy v
 
 The `examples/ice_cream_cone_demo.ipynb` notebook demonstrates the full VoxelCAD pipeline — CSG booleans, coordinate transforms, and mesh export in a few lines:
 
-<img src="images/ice_cream_256.png" alt="ice cream cone CSG demo" width="400"/>
+<img src="images/ice_cream_transforms_256.png" alt="ice cream cone with CSG transforms" width="600"/>
 
 ```python
 from voxelcad import Sphere, Cylinder
