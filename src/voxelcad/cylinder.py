@@ -44,7 +44,13 @@ class Cylinder(VoxelModel):
 
     def _render_cython(self, grid, M4inv=None):
         """Cython fused evaluate-and-pack for cylinder geometry."""
-        if evaluate_and_pack_cylinder is None or M4inv is not None:
+        if evaluate_and_pack_cylinder is None:
+            if ENV.use_cython:
+                import warnings
+                warnings.warn(
+                    "Cylinder: Cython kernel unavailable, falling back to NumPy",
+                    RuntimeWarning, stacklevel=3,
+                )
             return self._render_numpy(grid, M4inv)
         TIMING_START("cylinder_render_cython")
         xcc, ycc, zcc = grid.compute_cell_center_ranges()
@@ -52,6 +58,7 @@ class Cylinder(VoxelModel):
         result = evaluate_and_pack_cylinder(
             xcc, ycc, zcc, cx, cy, cz,
             self.h, self.r1, self.r2,
+            M4inv=M4inv,
         )
         TIMING_END("cylinder_render_cython")
         return result

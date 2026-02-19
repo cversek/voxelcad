@@ -28,7 +28,13 @@ class Cube(VoxelModel):
 
     def _render_cython(self, grid, M4inv=None):
         """Cython fused evaluate-and-pack for cube geometry."""
-        if evaluate_and_pack_cube is None or M4inv is not None:
+        if evaluate_and_pack_cube is None:
+            if ENV.use_cython:
+                import warnings
+                warnings.warn(
+                    "Cube: Cython kernel unavailable, falling back to NumPy",
+                    RuntimeWarning, stacklevel=3,
+                )
             return self._render_numpy(grid, M4inv)
         TIMING_START("cube_render_cython")
         xcc, ycc, zcc = grid.compute_cell_center_ranges()
@@ -37,6 +43,7 @@ class Cube(VoxelModel):
         result = evaluate_and_pack_cube(
             xcc, ycc, zcc, cx, cy, cz,
             sx / 2.0, sy / 2.0, sz / 2.0,
+            M4inv=M4inv,
         )
         TIMING_END("cube_render_cython")
         return result

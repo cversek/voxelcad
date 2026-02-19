@@ -29,7 +29,13 @@ class GyroidCube(Cube):
 
     def _render_cython(self, grid, M4inv=None):
         """Cython fused evaluate-and-pack for gyroid geometry."""
-        if evaluate_and_pack_gyroid is None or M4inv is not None:
+        if evaluate_and_pack_gyroid is None:
+            if ENV.use_cython:
+                import warnings
+                warnings.warn(
+                    "GyroidCube: Cython kernel unavailable, falling back to NumPy",
+                    RuntimeWarning, stacklevel=3,
+                )
             return self._render_numpy(grid, M4inv)
         TIMING_START("gyroid_render_cython")
         xcc, ycc, zcc = grid.compute_cell_center_ranges()
@@ -45,6 +51,7 @@ class GyroidCube(Cube):
             self.thresh1 if self.thresh1 is not None else 0.0,
             self.thresh2 if self.thresh2 is not None else 0.0,
             1 if (self.thresh1 is not None and self.thresh2 is not None) else 0,
+            M4inv=M4inv,
         )
         TIMING_END("gyroid_render_cython")
         return result
@@ -101,7 +108,13 @@ class WigglyGyroidCube(GyroidCube):
 
     def _render_cython(self, grid, M4inv=None):
         """Cython fused evaluate-and-pack for wiggly gyroid geometry."""
-        if evaluate_and_pack_wiggly_gyroid is None or M4inv is not None:
+        if evaluate_and_pack_wiggly_gyroid is None:
+            if ENV.use_cython:
+                import warnings
+                warnings.warn(
+                    "WigglyGyroidCube: Cython kernel unavailable, falling back to NumPy",
+                    RuntimeWarning, stacklevel=3,
+                )
             return self._render_numpy(grid, M4inv)
         TIMING_START("wiggly_gyroid_render_cython")
         xcc, ycc, zcc = grid.compute_cell_center_ranges()
@@ -115,6 +128,7 @@ class WigglyGyroidCube(GyroidCube):
             self.phi[0], self.phi[1], self.phi[2],
             self.structure_param, self.thresh1, self.thresh2,
             self.w_freq, self.w_amp, self.w_expon,
+            M4inv=M4inv,
         )
         TIMING_END("wiggly_gyroid_render_cython")
         return result
@@ -181,7 +195,13 @@ class HyperWigglyGyroidCube(GyroidCube):
 
     def _render_cython(self, grid, M4inv=None):
         """Cython fused evaluate-and-pack for hyper-wiggly gyroid geometry."""
-        if evaluate_and_pack_hyperwiggly_gyroid is None or M4inv is not None:
+        if evaluate_and_pack_hyperwiggly_gyroid is None:
+            if ENV.use_cython:
+                import warnings
+                warnings.warn(
+                    "HyperWigglyGyroidCube: Cython kernel unavailable, falling back to NumPy",
+                    RuntimeWarning, stacklevel=3,
+                )
             return self._render_numpy(grid, M4inv)
         TIMING_START("hyperwiggly_gyroid_render_cython")
         xcc, ycc, zcc = grid.compute_cell_center_ranges()
@@ -195,6 +215,7 @@ class HyperWigglyGyroidCube(GyroidCube):
             self.phi[0], self.phi[1], self.phi[2],
             self.structure_param, self.thresh1, self.thresh2,
             self.w_freq, self.w_amp, self.w_expon,
+            M4inv=M4inv,
         )
         TIMING_END("hyperwiggly_gyroid_render_cython")
         return result
