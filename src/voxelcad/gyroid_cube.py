@@ -102,6 +102,11 @@ class WigglyGyroidCube(GyroidCube):
                  w_amp    = 0.5,
                  **kwargs):
         super().__init__(size,**kwargs)
+        if self.thresh1 is None or self.thresh2 is None:
+            raise ValueError(
+                "WigglyGyroidCube requires both thresh1 and thresh2. "
+                "Example: WigglyGyroidCube(10, thresh1=-0.5, thresh2=0.5)"
+            )
         self.w_freq   = w_freq
         self.w_expon  = w_expon
         self.w_amp    = w_amp
@@ -189,6 +194,11 @@ class HyperWigglyGyroidCube(GyroidCube):
                  w_amp    = 0.5,
                  **kwargs):
         super().__init__(size,**kwargs)
+        if self.thresh1 is None or self.thresh2 is None:
+            raise ValueError(
+                "HyperWigglyGyroidCube requires both thresh1 and thresh2. "
+                "Example: HyperWigglyGyroidCube(10, thresh1=-0.5, thresh2=0.5)"
+            )
         self.w_freq   = w_freq
         self.w_expon  = w_expon
         self.w_amp    = w_amp
