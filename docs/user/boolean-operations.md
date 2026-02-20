@@ -25,6 +25,10 @@ rounded_cube = s & c                           # sphere-clipped cube
 combined = s | c                               # merged shape
 ```
 
+| Hollow sphere | Rounded cube | Combined |
+|:-------------:|:------------:|:--------:|
+| ![Hollow](_images/boolean-operations/basic-usage_0_hollow.png) | ![Rounded cube](_images/boolean-operations/basic-usage_0_rounded_cube.png) | ![Combined](_images/boolean-operations/basic-usage_0_combined.png) |
+
 ## Chaining
 
 Operations return models that support further operations:
@@ -38,6 +42,8 @@ hole = Cylinder(h=8, r=1.5, center=True, voxel_size=0.2)
 # Cube with a cylindrical hole, intersected with a sphere
 result = (body - hole) & Sphere(r=4, voxel_size=0.2)
 ```
+
+![Chained boolean result](_images/boolean-operations/chaining_0_result.png)
 
 Chained operations build a lazy CSG tree. Nothing renders until you call `plot()`, `export()`, or `render_volume()`.
 
@@ -57,6 +63,8 @@ b = Cube(size=8, voxel_size=0.2, center=True)
 result = a & b  # renders both to common grid first
 ```
 
+![Grid matching result](_images/boolean-operations/grid-matching_0_result.png)
+
 When operands share the same grid (same voxel_size and overlapping bounds), VoxelCAD uses byte-level bitwise operations on packed arrays - effectively instant. When grids differ, all operands render to a common union grid before combining.
 
 ## Difference vs XOR
@@ -73,6 +81,10 @@ diff = s - c   # sphere with cube-shaped bite taken out
 xor = s ^ c    # shell-like shape where they don't overlap
 ```
 
+| Difference (`s - c`) | XOR (`s ^ c`) |
+|:---------------------:|:-------------:|
+| ![Difference](_images/boolean-operations/difference-vs-xor_0_diff.png) | ![XOR](_images/boolean-operations/difference-vs-xor_0_xor.png) |
+
 ## Inversion
 
 `~model` flips every voxel in the model's bounding box. Useful for creating negative molds:
@@ -81,5 +93,7 @@ xor = s ^ c    # shell-like shape where they don't overlap
 s = Sphere(r=3, voxel_size=0.2)
 mold = Cube(size=8, voxel_size=0.2, center=True) & ~s  # cube with sphere-shaped cavity
 ```
+
+![Negative mold](_images/boolean-operations/inversion_0_mold.png)
 
 Inversion is always eager (returns immediately) since it operates on a single model's packed data.

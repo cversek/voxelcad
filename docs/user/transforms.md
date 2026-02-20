@@ -24,6 +24,10 @@ scaled = s.scale([2, 1, 0.5])       # stretch X, squash Z
 uniform = s.scale(2.0)              # double all axes
 ```
 
+| Translated | Rotated | Scaled | Uniform scale |
+|:----------:|:-------:|:------:|:-------------:|
+| ![Translated](_images/transforms/basic-usage_0_moved.png) | ![Rotated](_images/transforms/basic-usage_0_rotated.png) | ![Scaled](_images/transforms/basic-usage_0_scaled.png) | ![Uniform](_images/transforms/basic-usage_0_uniform.png) |
+
 All angles are in degrees.
 
 ## Chaining
@@ -36,6 +40,8 @@ arm = Cylinder(h=10, r=1, voxel_size=0.2)
 # Rotate, then move into position
 placed = arm.rotate_x(90).translate([5, 0, 0])
 ```
+
+![Chained transform](_images/transforms/chaining_0_placed.png)
 
 The order matters. `rotate then translate` puts the rotated object at (5,0,0). `translate then rotate` rotates the already-displaced object around the origin.
 
@@ -56,6 +62,8 @@ result = model.translate([1,0,0]).rotate_z(30).scale(1.5).translate([0,5,0])
 result.plot()
 ```
 
+![Lazy evaluation result](_images/transforms/lazy-evaluation_0_result.png)
+
 ## Transforms + Booleans
 
 Transforms and booleans compose freely:
@@ -72,6 +80,10 @@ ice_cream = scoop_up | cone               # combine
 tilted = ice_cream.rotate_x(15)           # tilt the whole thing
 ```
 
+| Scoop raised | Ice cream cone | Tilted |
+|:------------:|:--------------:|:------:|
+| ![Scoop up](_images/transforms/transforms-booleans_0_scoop_up.png) | ![Ice cream](_images/transforms/transforms-booleans_0_ice_cream.png) | ![Tilted](_images/transforms/transforms-booleans_0_tilted.png) |
+
 ## Arbitrary Rotation
 
 For rotations around an arbitrary axis, use `rotate()`:
@@ -80,6 +92,8 @@ For rotations around an arbitrary axis, use `rotate()`:
 model = Sphere(r=3, voxel_size=0.2)
 rotated = model.rotate([1, 1, 0], 45)  # 45 degrees around the (1,1,0) axis
 ```
+
+![Arbitrary rotation](_images/transforms/arbitrary-rotation_0_rotated.png)
 
 The axis vector is normalized internally.
 
@@ -91,3 +105,5 @@ Non-uniform scaling changes voxel aspect ratios. At extreme ratios (e.g., `scale
 # Thin disk: scale a sphere flat along Z
 disk = Sphere(r=5, voxel_size=0.05).scale([1, 1, 0.1])
 ```
+
+![Thin disk](_images/transforms/scale-caveats_0_disk.png)

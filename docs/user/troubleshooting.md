@@ -73,6 +73,8 @@ b = Cube(size=8, voxel_size=0.2)   # different!
 result = a & b                      # resampling may lose detail
 ```
 
+![Mismatched voxel_size result](_images/troubleshooting/boolean-result-looks-wrong_0_result.png)
+
 When voxel sizes differ, the finer model is resampled to the coarser grid. Use matching sizes.
 
 ### Transform produces unexpected orientation
