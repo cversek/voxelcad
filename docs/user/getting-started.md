@@ -21,6 +21,8 @@ s = Sphere(r=5, voxel_size=0.1)
 s.plot()
 ```
 
+![Sphere](_images/getting-started/your-first-model_0_s.png)
+
 `r=5` sets the radius. `voxel_size=0.1` controls resolution: smaller values produce finer detail but use more memory. A good starting point is `voxel_size = size / 100`.
 
 ## Boolean Operations
@@ -39,6 +41,10 @@ difference   = c - s   # cube with sphere carved out
 xor          = s ^ c   # where exactly one shape exists
 ```
 
+| Union | Intersection | Difference | XOR |
+|:-----:|:------------:|:----------:|:---:|
+| ![Union](_images/getting-started/boolean-operations_0_union.png) | ![Intersection](_images/getting-started/boolean-operations_0_intersection.png) | ![Difference](_images/getting-started/boolean-operations_0_difference.png) | ![XOR](_images/getting-started/boolean-operations_0_xor.png) |
+
 Both operands should use the same `voxel_size` for best performance.
 
 ## Transforms
@@ -53,6 +59,10 @@ rotated = s.rotate_z(45)             # degrees
 scaled  = s.scale([2, 1, 0.5])       # per-axis scale factors
 ```
 
+| Translated | Rotated | Scaled |
+|:----------:|:-------:|:------:|
+| ![Translated](_images/getting-started/transforms_0_moved.png) | ![Rotated](_images/getting-started/transforms_0_rotated.png) | ![Scaled](_images/getting-started/transforms_0_scaled.png) |
+
 Transforms are lazy: they store a matrix and evaluate on demand. Chained transforms compose into a single matrix.
 
 ## Export to STL
@@ -61,6 +71,8 @@ Transforms are lazy: they store a matrix and evaluate on demand. Chained transfo
 model = Sphere(r=5, voxel_size=0.1) & Cube(size=8, voxel_size=0.1, center=True)
 model.export("output.stl")
 ```
+
+![Sphere-Cube intersection](_images/getting-started/export-to-stl_0_model.png)
 
 The exported STL can be loaded into any slicer for 3D printing.
 

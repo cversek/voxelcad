@@ -1,5 +1,6 @@
 *.stl
 *.png
+!docs/user/_images/**/*.png
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
