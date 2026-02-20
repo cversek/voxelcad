@@ -15,6 +15,14 @@ Sphere(r, voxel_size=None)
 
 Centered at origin. Bounding box: `[-r, r]` on all axes.
 
+```python
+from voxelcad import Sphere
+
+sphere = Sphere(r=5, voxel_size=0.2)
+```
+
+![Sphere](_images/geometry-catalog/sphere_0_sphere.png)
+
 ## Cube
 
 ```python
@@ -26,6 +34,14 @@ Cube(size, voxel_size=None, center=False)
 | `size` | float | Edge length |
 | `voxel_size` | float | Voxel edge length |
 | `center` | bool | If True, center at origin. If False, corner at origin. |
+
+```python
+from voxelcad import Cube
+
+cube = Cube(size=8, voxel_size=0.2, center=True)
+```
+
+![Cube](_images/geometry-catalog/cube_0_cube.png)
 
 ## Cylinder
 
@@ -41,7 +57,16 @@ Cylinder(h, r=None, r1=None, r2=None, center=False, voxel_size=None)
 | `r2` | float | Radius at top (z=h). Set `r2 < r1` for a cone. |
 | `center` | bool | If True, center vertically at origin. |
 
-**Cone example**: `Cylinder(h=8, r1=4, r2=0)` creates a cone from radius 4 at the base to a point at the top.
+```python
+from voxelcad import Cylinder
+
+cylinder = Cylinder(h=8, r=3, center=True, voxel_size=0.2)
+cone = Cylinder(h=8, r1=4, r2=0, voxel_size=0.2)
+```
+
+| Cylinder | Cone |
+|:--------:|:----:|
+| ![Cylinder](_images/geometry-catalog/cylinder_0_cylinder.png) | ![Cone](_images/geometry-catalog/cylinder_0_cone.png) |
 
 ## GyroidCube
 
@@ -67,9 +92,16 @@ G(x,y,z) = cos(ax)*sin(by) + cos(by)*sin(cz) + cos(cz)*sin(ax)
 
 where `a, b, c` are derived from `lattice_param` and `size`.
 
-**Shell example**: `GyroidCube(10, thresh1=0.3, thresh2=-0.3)` produces a thin gyroid shell.
+```python
+from voxelcad.gyroid_cube import GyroidCube
 
-**Dense lattice**: `GyroidCube(10, lattice_param=2.0)` doubles the spatial frequency.
+gyroid = GyroidCube(10, voxel_size=0.05)
+dense = GyroidCube(10, lattice_param=2.0, voxel_size=0.05)
+```
+
+| Standard | Dense lattice |
+|:--------:|:-------------:|
+| ![Gyroid](_images/geometry-catalog/gyroidcube_0_gyroid.png) | ![Dense](_images/geometry-catalog/gyroidcube_0_dense.png) |
 
 ## WigglyGyroidCube
 
@@ -85,6 +117,14 @@ Inherits all `GyroidCube` parameters. Adds sinusoidal modulation to the gyroid a
 | `w_expon` | float | Exponent applied to the modulation |
 | `w_amp` | float | Amplitude of the wiggle effect |
 
+```python
+from voxelcad.gyroid_cube import WigglyGyroidCube
+
+wiggly = WigglyGyroidCube(10, thresh1=-0.5, thresh2=0.5, voxel_size=0.05)
+```
+
+![WigglyGyroidCube](_images/geometry-catalog/wigglygyroidcube_0_wiggly.png)
+
 ## HyperWigglyGyroidCube
 
 ```python
@@ -92,6 +132,14 @@ HyperWigglyGyroidCube(size, w_freq=5, w_expon=3, w_amp=0.5, **kwargs)
 ```
 
 Same parameters as `WigglyGyroidCube` with a more extreme modulation pattern.
+
+```python
+from voxelcad.gyroid_cube import HyperWigglyGyroidCube
+
+hyperwiggly = HyperWigglyGyroidCube(10, thresh1=-0.5, thresh2=0.5, voxel_size=0.05)
+```
+
+![HyperWigglyGyroidCube](_images/geometry-catalog/hyperwigglygyroidcube_0_hyperwiggly.png)
 
 ## Common Parameters
 

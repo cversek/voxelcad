@@ -60,7 +60,7 @@ def render_boolean_operations__basic_usage__0():
 
 def render_boolean_operations__chaining__0():
     # Source: docs/user/boolean-operations.md
-    # Section: Chaining (line 32)
+    # Section: Chaining (line 36)
     # Models: result
     from voxelcad import Sphere, Cube, Cylinder
 
@@ -75,7 +75,7 @@ def render_boolean_operations__chaining__0():
 
 def render_boolean_operations__grid_matching__0():
     # Source: docs/user/boolean-operations.md
-    # Section: Grid Matching (line 48)
+    # Section: Grid Matching (line 54)
     # Models: result
     # Fast: same voxel_size, byte-level bitwise ops
     a = Sphere(r=5, voxel_size=0.1)
@@ -92,7 +92,7 @@ def render_boolean_operations__grid_matching__0():
 
 def render_boolean_operations__difference_vs_xor__0():
     # Source: docs/user/boolean-operations.md
-    # Section: Difference vs XOR (line 68)
+    # Section: Difference vs XOR (line 76)
     # Models: diff, xor
     s = Sphere(r=4, voxel_size=0.2)
     c = Cube(size=6, voxel_size=0.2, center=True)
@@ -106,12 +106,82 @@ def render_boolean_operations__difference_vs_xor__0():
 
 def render_boolean_operations__inversion__0():
     # Source: docs/user/boolean-operations.md
-    # Section: Inversion (line 80)
+    # Section: Inversion (line 92)
     # Models: mold
     s = Sphere(r=3, voxel_size=0.2)
     mold = Cube(size=8, voxel_size=0.2, center=True) & ~s  # cube with sphere-shaped cavity
 
     render_model(mold, IMAGES_DIR / 'boolean-operations' / 'inversion_0_mold.png')
+
+
+def render_geometry_catalog__sphere__0():
+    # Source: docs/user/geometry-catalog.md
+    # Section: Sphere (line 18)
+    # Models: sphere
+    from voxelcad import Sphere
+
+    sphere = Sphere(r=5, voxel_size=0.2)
+
+    render_model(sphere, IMAGES_DIR / 'geometry-catalog' / 'sphere_0_sphere.png')
+
+
+def render_geometry_catalog__cube__0():
+    # Source: docs/user/geometry-catalog.md
+    # Section: Cube (line 38)
+    # Models: cube
+    from voxelcad import Cube
+
+    cube = Cube(size=8, voxel_size=0.2, center=True)
+
+    render_model(cube, IMAGES_DIR / 'geometry-catalog' / 'cube_0_cube.png')
+
+
+def render_geometry_catalog__cylinder__0():
+    # Source: docs/user/geometry-catalog.md
+    # Section: Cylinder (line 60)
+    # Models: cylinder, cone
+    from voxelcad import Cylinder
+
+    cylinder = Cylinder(h=8, r=3, center=True, voxel_size=0.2)
+    cone = Cylinder(h=8, r1=4, r2=0, voxel_size=0.2)
+
+    render_model(cylinder, IMAGES_DIR / 'geometry-catalog' / 'cylinder_0_cylinder.png')
+    render_model(cone, IMAGES_DIR / 'geometry-catalog' / 'cylinder_0_cone.png')
+
+
+def render_geometry_catalog__gyroidcube__0():
+    # Source: docs/user/geometry-catalog.md
+    # Section: GyroidCube (line 95)
+    # Models: gyroid, dense
+    from voxelcad.gyroid_cube import GyroidCube
+
+    gyroid = GyroidCube(10, voxel_size=0.05)
+    dense = GyroidCube(10, lattice_param=2.0, voxel_size=0.05)
+
+    render_model(gyroid, IMAGES_DIR / 'geometry-catalog' / 'gyroidcube_0_gyroid.png')
+    render_model(dense, IMAGES_DIR / 'geometry-catalog' / 'gyroidcube_0_dense.png')
+
+
+def render_geometry_catalog__wigglygyroidcube__0():
+    # Source: docs/user/geometry-catalog.md
+    # Section: WigglyGyroidCube (line 120)
+    # Models: wiggly
+    from voxelcad.gyroid_cube import WigglyGyroidCube
+
+    wiggly = WigglyGyroidCube(10, thresh1=-0.5, thresh2=0.5, voxel_size=0.05)
+
+    render_model(wiggly, IMAGES_DIR / 'geometry-catalog' / 'wigglygyroidcube_0_wiggly.png')
+
+
+def render_geometry_catalog__hyperwigglygyroidcube__0():
+    # Source: docs/user/geometry-catalog.md
+    # Section: HyperWigglyGyroidCube (line 136)
+    # Models: hyperwiggly
+    from voxelcad.gyroid_cube import HyperWigglyGyroidCube
+
+    hyperwiggly = HyperWigglyGyroidCube(10, thresh1=-0.5, thresh2=0.5, voxel_size=0.05)
+
+    render_model(hyperwiggly, IMAGES_DIR / 'geometry-catalog' / 'hyperwigglygyroidcube_0_hyperwiggly.png')
 
 
 def render_getting_started__your_first_model__0():
@@ -128,7 +198,7 @@ def render_getting_started__your_first_model__0():
 
 def render_getting_started__boolean_operations__0():
     # Source: docs/user/getting-started.md
-    # Section: Boolean Operations (line 30)
+    # Section: Boolean Operations (line 32)
     # Models: union, intersection, difference, xor
     from voxelcad import Sphere, Cube
 
@@ -148,7 +218,7 @@ def render_getting_started__boolean_operations__0():
 
 def render_getting_started__transforms__0():
     # Source: docs/user/getting-started.md
-    # Section: Transforms (line 48)
+    # Section: Transforms (line 54)
     # Models: moved, rotated, scaled
     s = Sphere(r=3, voxel_size=0.2)
 
@@ -163,7 +233,7 @@ def render_getting_started__transforms__0():
 
 def render_getting_started__export_to_stl__0():
     # Source: docs/user/getting-started.md
-    # Section: Export to STL (line 60)
+    # Section: Export to STL (line 70)
     # Models: model
     model = Sphere(r=5, voxel_size=0.1) & Cube(size=8, voxel_size=0.1, center=True)
 
@@ -190,7 +260,7 @@ def render_transforms__basic_usage__0():
 
 def render_transforms__chaining__0():
     # Source: docs/user/transforms.md
-    # Section: Chaining (line 33)
+    # Section: Chaining (line 37)
     # Models: placed
     arm = Cylinder(h=10, r=1, voxel_size=0.2)
 
@@ -202,7 +272,7 @@ def render_transforms__chaining__0():
 
 def render_transforms__lazy_evaluation__0():
     # Source: docs/user/transforms.md
-    # Section: Lazy Evaluation (line 52)
+    # Section: Lazy Evaluation (line 58)
     # Models: result
     model = Sphere(r=2, voxel_size=0.1)
     result = model.translate([1,0,0]).rotate_z(30).scale(1.5).translate([0,5,0])
@@ -214,7 +284,7 @@ def render_transforms__lazy_evaluation__0():
 
 def render_transforms__transforms_booleans__0():
     # Source: docs/user/transforms.md
-    # Section: Transforms + Booleans (line 63)
+    # Section: Transforms + Booleans (line 71)
     # Models: scoop_up, ice_cream, tilted
     from voxelcad import Sphere, Cylinder
 
@@ -233,7 +303,7 @@ def render_transforms__transforms_booleans__0():
 
 def render_transforms__arbitrary_rotation__0():
     # Source: docs/user/transforms.md
-    # Section: Arbitrary Rotation (line 79)
+    # Section: Arbitrary Rotation (line 91)
     # Models: rotated
     model = Sphere(r=3, voxel_size=0.2)
     rotated = model.rotate([1, 1, 0], 45)  # 45 degrees around the (1,1,0) axis
@@ -243,7 +313,7 @@ def render_transforms__arbitrary_rotation__0():
 
 def render_transforms__scale_caveats__0():
     # Source: docs/user/transforms.md
-    # Section: Scale Caveats (line 90)
+    # Section: Scale Caveats (line 104)
     # Models: disk
     # Thin disk: scale a sphere flat along Z
     disk = Sphere(r=5, voxel_size=0.05).scale([1, 1, 0.1])
@@ -268,6 +338,12 @@ EXAMPLES = [
     ('boolean-operations/grid-matching_0', render_boolean_operations__grid_matching__0),
     ('boolean-operations/difference-vs-xor_0', render_boolean_operations__difference_vs_xor__0),
     ('boolean-operations/inversion_0', render_boolean_operations__inversion__0),
+    ('geometry-catalog/sphere_0', render_geometry_catalog__sphere__0),
+    ('geometry-catalog/cube_0', render_geometry_catalog__cube__0),
+    ('geometry-catalog/cylinder_0', render_geometry_catalog__cylinder__0),
+    ('geometry-catalog/gyroidcube_0', render_geometry_catalog__gyroidcube__0),
+    ('geometry-catalog/wigglygyroidcube_0', render_geometry_catalog__wigglygyroidcube__0),
+    ('geometry-catalog/hyperwigglygyroidcube_0', render_geometry_catalog__hyperwigglygyroidcube__0),
     ('getting-started/your-first-model_0', render_getting_started__your_first_model__0),
     ('getting-started/boolean-operations_0', render_getting_started__boolean_operations__0),
     ('getting-started/transforms_0', render_getting_started__transforms__0),
