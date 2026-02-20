@@ -17,6 +17,12 @@ dependencies = [
 
 [project.optional-dependencies]
 viz = ["pyvista", "vtk", "pymeshfix"]
+dev = [
+    "pytest",
+    "pytest-benchmark",
+    "cython",
+    "pyvista",
+]
 
 [project.scripts]
 voxelcad_shell = "voxelcad.scripts.shell:main"
