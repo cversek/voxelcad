@@ -13,6 +13,20 @@
 | 0.01 | 1000^3 | 119 MB | ~1 s |
 | 0.005 | 2000^3 | 954 MB | ~10 s |
 
+The visual difference between resolutions:
+
+```python
+from voxelcad import Sphere
+
+coarse = Sphere(r=5, voxel_size=1.0)
+medium = Sphere(r=5, voxel_size=0.5)
+fine = Sphere(r=5, voxel_size=0.1)
+```
+
+| voxel_size=1.0 | voxel_size=0.5 | voxel_size=0.1 |
+|:--------------:|:--------------:|:--------------:|
+| ![Coarse](_images/performance-guide/resolution-selection_0_coarse.png) | ![Medium](_images/performance-guide/resolution-selection_0_medium.png) | ![Fine](_images/performance-guide/resolution-selection_0_fine.png) |
+
 Start coarse (`voxel_size=0.5`) for iteration. Increase for final export.
 
 ## Cython Acceleration

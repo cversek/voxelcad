@@ -240,6 +240,21 @@ def render_getting_started__export_to_stl__0():
     render_model(model, IMAGES_DIR / 'getting-started' / 'export-to-stl_0_model.png')
 
 
+def render_performance_guide__resolution_selection__0():
+    # Source: docs/user/performance-guide.md
+    # Section: Resolution Selection (line 18)
+    # Models: coarse, medium, fine
+    from voxelcad import Sphere
+
+    coarse = Sphere(r=5, voxel_size=1.0)
+    medium = Sphere(r=5, voxel_size=0.5)
+    fine = Sphere(r=5, voxel_size=0.1)
+
+    render_model(coarse, IMAGES_DIR / 'performance-guide' / 'resolution-selection_0_coarse.png')
+    render_model(medium, IMAGES_DIR / 'performance-guide' / 'resolution-selection_0_medium.png')
+    render_model(fine, IMAGES_DIR / 'performance-guide' / 'resolution-selection_0_fine.png')
+
+
 def render_transforms__basic_usage__0():
     # Source: docs/user/transforms.md
     # Section: Basic Usage (line 17)
@@ -348,6 +363,7 @@ EXAMPLES = [
     ('getting-started/boolean-operations_0', render_getting_started__boolean_operations__0),
     ('getting-started/transforms_0', render_getting_started__transforms__0),
     ('getting-started/export-to-stl_0', render_getting_started__export_to_stl__0),
+    ('performance-guide/resolution-selection_0', render_performance_guide__resolution_selection__0),
     ('transforms/basic-usage_0', render_transforms__basic_usage__0),
     ('transforms/chaining_0', render_transforms__chaining__0),
     ('transforms/lazy-evaluation_0', render_transforms__lazy_evaluation__0),
