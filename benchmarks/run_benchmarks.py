@@ -27,6 +27,9 @@ from benchmarks.benchmark_fallback_breaking import (
     BenchmarkManualComposition, BenchmarkTier2CompatibleGrid,
     BenchmarkTransformedInCSG, BenchmarkTransformOverhead,
 )
+from benchmarks.benchmark_export import (
+    BenchmarkSphereExport, BenchmarkGyroidSphereExport,
+)
 
 ALL_BENCHMARKS = [
     # Render
@@ -44,6 +47,9 @@ ALL_BENCHMARKS = [
     BenchmarkTier2CompatibleGrid,
     BenchmarkTransformedInCSG,
     BenchmarkTransformOverhead,
+    # Export (STL pipeline)
+    BenchmarkSphereExport,
+    BenchmarkGyroidSphereExport,
 ]
 
 
