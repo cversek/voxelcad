@@ -272,7 +272,7 @@ class VoxelModel:
         if smooth_iters > 0:
             _t0 = time.time()
             LOGGER.info(f"\trunning smooth...")
-            pv_surf = pv_surf.smooth(n_iter=smooth_iters,progress_bar=True)
+            pv_surf = pv_surf.smooth(n_iter=smooth_iters,progress_bar=ENV.progress_bar)
             LOGGER.info(f"\t...completed in {time.time()-_t0:0.1f} s")
         if downscale_times > 0:
             _t0 = time.time()

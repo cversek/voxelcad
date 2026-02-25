@@ -20,3 +20,10 @@ else:
         "Run 'python setup.py build_ext --inplace' to compile.",
         stacklevel=1,
     )
+
+# Auto-detect tqdm for progress bars in mesh smoothing etc.
+try:
+    import tqdm as _tqdm  # noqa: F401
+    progress_bar = True
+except ImportError:
+    progress_bar = False
