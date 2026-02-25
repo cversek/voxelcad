@@ -30,4 +30,4 @@
 - [Storage Format](architecture/storage-format.md) -- F-order packed booleans, byte alignment
 - [Query Planner](architecture/query-planner.md) -- CSG tree analysis and execution planning
 - [Memory Model](architecture/memory-model.md) -- Scaling laws, streaming, peak tracking
-- [GPU Design](architecture/gpu-design.md) -- Backend abstraction for CuPy/MLX/NumPy
+- [GPU Design](architecture/gpu-design.md) -- OpenMP target offloading, CuPy/MLX backends
