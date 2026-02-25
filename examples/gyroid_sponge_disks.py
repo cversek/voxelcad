@@ -1,7 +1,13 @@
-from voxelcad.gyroid_cube import GyroidCube
-from voxelcad.cylinder import Cylinder
+"""Gyroid Sponge Disks — gyroid lattice trimmed to a cylinder.
 
-import voxelcad.environment as ENV
+Intersects a gyroid cube with a cylinder to create a disk-shaped
+lattice scaffold.  Demonstrates boolean intersection between a
+lattice primitive and a conventional primitive.
+
+Usage:
+    python -c "from gyroid_sponge_disks import export; export()"
+"""
+from voxelcad import GyroidCube, Cylinder, ENV
 
 RES = 512
 SMOOTH_ITERS = 1000

@@ -1,6 +1,13 @@
-from voxelcad.gyroid_cube import GyroidCube
-from voxelcad.cylinder import Cylinder
-import voxelcad.environment as ENV
+"""Gyroid Electrode Support Plug — real-world multi-component assembly.
+
+A functional part design: gyroid body for flexibility, tapered plug
+for friction fit, and stem connecting them.  Demonstrates multi-component
+union, tapered cylinders (r1/r2), and parameterized export.
+
+Usage:
+    python -c "from gyroid_electrode_support_plug_conn import export; export()"
+"""
+from voxelcad import GyroidCube, Cylinder, ENV
 
 RES = 1024
 SMOOTH_ITERS     = 1000

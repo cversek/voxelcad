@@ -1,6 +1,12 @@
-from voxelcad.gyroid_cube import GyroidCube
+"""Gyroid Sponge — high-resolution lattice slab for 3D printing.
 
-import voxelcad.environment as ENV
+Creates a 10x10x10 mm gyroid sponge at 1024^3 resolution with
+Laplacian smoothing and mesh downsampling for clean STL output.
+
+Usage:
+    python -c "from gyroid_sponge import export; export()"
+"""
+from voxelcad import GyroidCube, ENV
 
 RES = 1024
 SMOOTH_ITERS = 1000
