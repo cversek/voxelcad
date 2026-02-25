@@ -11,19 +11,23 @@ Usage:
 from voxelcad import Sphere, GyroidCube, ENV
 
 # Resolution: smaller voxel_size = finer detail, more memory
-ENV.voxel_size = 0.1  # mm
+# 0.05 mm on a 10 mm sphere -> 200^3 grid (~1 MB packed)
+ENV.voxel_size = 0.05  # mm
 
 # A sphere of radius 5 mm
 sphere = Sphere(r=5)
 
 # A gyroid lattice filling a 12 mm cube, centered at origin
-gyroid = GyroidCube(12, center=True, lattice_param=1.0,
+gyroid = GyroidCube(12, center=True, lattice_param=1.5,
                     thresh1=-0.3, thresh2=0.3)
 
 # Intersect: keep only the gyroid inside the sphere
 model = sphere & gyroid
 
-# Export to STL for 3D printing
+# Export to STL with smoothing for clean mesh
 print("Rendering and exporting gyroid sphere...")
-model.export("hello_gyroid_sphere.stl")
+model.export("hello_gyroid_sphere.stl",
+             smooth_iters=500,
+             downscale_times=1,
+             only_largest_component=True)
 print("Saved: hello_gyroid_sphere.stl")

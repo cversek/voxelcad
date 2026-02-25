@@ -260,7 +260,7 @@ class VoxelModel:
             return self.pv_surf
         import pyvista as pv
         pv_vol  = self.render_volume_mesh()
-        pv_surf = pv_vol.extract_surface()
+        pv_surf = pv_vol.extract_surface(algorithm='dataset_surface')
         if use_meshfix:
             _t0 = time.time()
             LOGGER.info(f"\trunning meshfix.repair()...")
@@ -309,6 +309,7 @@ class VoxelModel:
     def export(self, filename, **kwargs):
         basepath, ext = os.path.splitext(filename)
         if ext == ".stl": #STL for 3d Printing
+            kwargs.setdefault('cache', False)  # avoid stale PyVista refs at exit
             surf_mesh = self.render_surface_mesh(**kwargs)
             surf_mesh.save(filename)
         else:
