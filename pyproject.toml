@@ -6,10 +6,22 @@ build-backend = "setuptools.build_meta"
 name = "voxelcad"
 dynamic = ["version"]
 description = "Voxel-based CAD tool for 3D design and printing"
+readme = "README.md"
+license = "MIT"
 authors = [
     {name = "Craig Wm. Versek", email = "cversek@gmail.com"},
 ]
 requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Manufacturing",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Cython",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+]
 dependencies = [
     "numpy>=1.20",
     "matplotlib>=3.0",
@@ -23,6 +35,10 @@ dev = [
     "cython",
     "pyvista",
 ]
+
+[project.urls]
+Repository = "https://github.com/manny-dev-neurofieldz/voxelcad"
+Documentation = "https://github.com/manny-dev-neurofieldz/voxelcad/tree/main/docs"
 
 [project.scripts]
 voxelcad_shell = "voxelcad.scripts.shell:main"

@@ -1,8 +1,8 @@
 # VoxelCAD
 
-Pythonic tools for design using numpy arrays and discrete volume elements "voxels" for construction and rendering. Inspired by OpenSCAD, but addressing computational efficiencies for complex structures.
+Voxel-based 3D modeling in Python. Design with boolean operations, export to STL for 3D printing.
 
-Support for mathematically defined volume structures is emphasized, setting this package apart from surface mesh based CAD tools. Rendering and operating on dense gyroid structures is relatively quick in voxel representation as we need not get bogged down in complex mesh merges. Surface mesh structures can be generated for display and export purposes.
+VoxelCAD represents geometry as packed boolean arrays instead of surface meshes. This makes complex structures — gyroids, lattices, intersections of implicit surfaces — as easy to combine as simple primitives. No mesh merges, no manifold repair, no topology headaches.
 
 ## Gallery
 
@@ -11,18 +11,6 @@ Support for mathematically defined volume structures is emphasized, setting this
 | ![](images/sphere_256.png) | ![](images/gyroid_cube_256.png) | ![](images/gyroid_and_cylinder_256.png) | ![](images/cube_minus_sphere_256.png) |
 
 All renders produced with PyVista offscreen at resolution 256.
-
-## Performance
-
-VoxelCAD uses Cython kernels with OpenMP parallelism for the compute-intensive inner loops, while keeping the full Scientific Python ecosystem accessible for orchestration, visualization, and analysis.
-
-| Operation | NumPy | Cython (parallel) | Speedup |
-|-----------|-------|--------------------|---------|
-| Geometry eval + pack (sphere, res=1024) | 4.7s | 80ms | 60x |
-| Resample + nearest-neighbor | 160ms | 4.2ms | 38x |
-| CSG boolean (same grid) | 8.7ms | 3.1ms | 2.8x |
-
-Cython kernels stream one voxel at a time, reducing memory from ~4.6 GB (NumPy vectorized) to ~50 MB. All primitives support coordinate transforms (translate, rotate, scale) directly in Cython without falling back to NumPy.
 
 ## Quick Start: Ice Cream Cone Demo
 
@@ -42,12 +30,13 @@ ice_cream.plot()
 ice_cream.export("ice_cream.stl")
 ```
 
-To run the notebook:
-```bash
-conda activate voxelcad
-cd examples/
-jupyter notebook ice_cream_cone_demo.ipynb
-```
+## Features
+
+- **Boolean operations**: union (`|`), intersection (`&`), difference (`-`), XOR (`^`), inversion (`~`)
+- **Transforms**: translate, rotate, scale — composable, lazy, applied at render time via inverse transform matrices
+- **Primitives**: Sphere, Cube, Cylinder (with taper), GyroidCube, WigglyGyroidCube, HyperWigglyGyroidCube
+- **Export**: STL mesh via PyVista, with optional mesh repair
+- **Packed storage**: 8x memory reduction (1 GB bool → 128 MB uint8 at 1024^3)
 
 ## Visuals
 
@@ -64,23 +53,41 @@ The following image is of the part made with a Formlabs Form3 SLA 3D printer usi
 
 <img src="images/gyroid_cylinder_3d_print_form3_flexible80A.jpg" alt="3d printed gyroid cylinder" width="512"/>
 
+## Performance
+
+Cython kernels with OpenMP parallelism fuse geometry evaluation, thresholding, and bit-packing into a single pass. No intermediate arrays.
+
+*Benchmarked on Apple M3 Max (12 P-cores, 36 GB RAM):*
+
+| Operation | NumPy | Cython (parallel) | Speedup |
+|-----------|-------|--------------------|---------|
+| Geometry eval + pack (sphere, 1024^3) | 4.7 s | 80 ms | 60x |
+| Resample + nearest-neighbor | 160 ms | 4.2 ms | 38x |
+| CSG boolean (same grid) | 8.7 ms | 3.1 ms | 2.8x |
+
+Memory: ~50 MB peak (Cython streaming) vs ~4.6 GB (NumPy vectorized).
+
 ## Installation
 
-Setup dependencies:
 ```bash
-conda create -n voxelcad python=3.10
-conda activate voxelcad
-conda install -c conda-forge pyvista ipython tqdm cython numpy
-```
-
-Install VoxelCAD (with Cython extension build):
-```bash
-pip install -e .
+pip install -e ".[viz,dev]"
 python setup.py build_ext --inplace
 ```
 
+The second command compiles Cython extensions for 10-60x speedup. Without it, VoxelCAD falls back to NumPy with a warning.
+
+**Requirements**: Python 3.9+, NumPy. Optional: Cython, PyVista (visualization), pymeshfix (mesh repair).
+
+## Documentation
+
+- **[User Guide](docs/user/)** — Getting started, geometry catalog, boolean operations, transforms
+- **[Developer Guide](docs/developer/)** — Adding primitives, testing, build system, contributing
+- **[Architecture Guide](docs/architecture/)** — Optimization tiers, storage format, query planner, memory model
+
 ## Authors and acknowledgment
-Craig Versek <cversek@gmail.com>
+
+Craig Wm. Versek <cversek@gmail.com>
 
 ## License
+
 MIT
