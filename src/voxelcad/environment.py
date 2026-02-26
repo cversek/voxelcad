@@ -21,6 +21,10 @@ else:
         stacklevel=1,
     )
 
+# EDT-based export: use Euclidean Distance Transform for smooth mesh extraction.
+# When True, export() and plot() use EDT pipeline instead of meshfix.
+use_edt_export = True
+
 # Auto-detect tqdm for progress bars in mesh smoothing etc.
 try:
     import tqdm as _tqdm  # noqa: F401

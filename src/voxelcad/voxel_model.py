@@ -301,16 +301,95 @@ class VoxelModel:
         TIMING_END("render_surface_mesh")
         return pv_surf
 
-    def plot(self, *args,**kwargs):
-        vol_mesh = self.render_volume_mesh()
-        kwargs['color'] = kwargs.get('color','white') #provide default
-        vol_mesh.plot(*args,**kwargs)
+    def render_surface_mesh_edt(self, isovalue=0.5, cache=True,
+                                only_largest_component=False):
+        """Extract smooth surface mesh using Euclidean Distance Transform.
+
+        Computes EDT on the binary voxel volume, then runs marching cubes
+        on the smooth distance field. Produces inherently smooth, manifold
+        meshes without meshfix, smoothing, or decimation.
+
+        Args:
+            isovalue: Distance field threshold for isosurface extraction.
+                Higher values produce surfaces deeper inside the volume.
+            cache: If True, cache the result in self.pv_surf.
+            only_largest_component: If True, keep only the largest
+                connected component.
+
+        Returns:
+            PyVista PolyData surface mesh.
+        """
+        TIMING_START("render_surface_mesh_edt")
+        t0 = time.time()
+        LOGGER.info(f"{self.__class__.__name__} -> render_surface_mesh_edt")
+        mem0 = MEMORY_USAGE()
+        if cache and self.pv_surf is not None:
+            return self.pv_surf
+        from scipy.ndimage import distance_transform_edt
+        # Ensure volume is rendered
+        if self.voxel_data is None:
+            self.render_volume()
+        # Unpack to bool and compute EDT
+        V = self._unpack_volume()
+        _t0 = time.time()
+        LOGGER.info(f"\tcomputing EDT on {V.shape} volume...")
+        dist = distance_transform_edt(V)
+        LOGGER.info(f"\t...EDT completed in {time.time()-_t0:.1f} s")
+        # Build PyVista uniform grid from distance field (point data for contour)
+        rv = self.grid.res_vector
+        vsv = self.grid.voxel_size_vector
+        ugrid = UniformGrid()
+        ugrid.dimensions = rv  # point grid matches EDT array shape
+        ugrid.spacing = vsv
+        ugrid.point_data['dist'] = dist.flatten(order='F')
+        # Marching cubes via contour on the distance field
+        _t0 = time.time()
+        LOGGER.info(f"\textracting isosurface at isovalue={isovalue}...")
+        pv_surf = ugrid.contour([isovalue], scalars='dist')
+        LOGGER.info(f"\t...contour completed in {time.time()-_t0:.1f} s")
+        if only_largest_component and pv_surf.n_points > 0:
+            pv_surf = pv_surf.extract_largest()
+        if cache:
+            self.pv_surf = pv_surf
+        t1 = time.time()
+        LOGGER.info(f"END render_surface_mesh_edt, time: {t1-t0:.1f} s")
+        mem = MEMORY_USAGE(offset=mem0)
+        LOGGER.info(f"DELTA MEMORY USED: {mem/2**30:.2f} GB")
+        TIMING_END("render_surface_mesh_edt")
+        return pv_surf
+
+    def plot(self, *args, mode="volume", **kwargs):
+        """Plot the model.
+
+        Args:
+            mode: "volume" for voxel volume mesh, "surf" for EDT surface mesh.
+            *args, **kwargs: Passed to PyVista plot().
+        """
+        kwargs['color'] = kwargs.get('color', 'white')
+        if mode == "surf":
+            surf = self.render_surface_mesh_edt()
+            surf.plot(*args, **kwargs)
+        else:
+            vol_mesh = self.render_volume_mesh()
+            vol_mesh.plot(*args, **kwargs)
 
     def export(self, filename, **kwargs):
         basepath, ext = os.path.splitext(filename)
-        if ext == ".stl": #STL for 3d Printing
-            kwargs.setdefault('cache', False)  # avoid stale PyVista refs at exit
-            surf_mesh = self.render_surface_mesh(**kwargs)
+        if ext == ".stl":
+            if ENV.use_edt_export:
+                # EDT pipeline: extract isovalue and only_largest_component,
+                # pass remaining kwargs for future extensibility
+                isovalue = kwargs.pop('isovalue', 0.5)
+                only_largest = kwargs.pop('only_largest_component', False)
+                cache = kwargs.pop('cache', False)
+                surf_mesh = self.render_surface_mesh_edt(
+                    isovalue=isovalue,
+                    cache=cache,
+                    only_largest_component=only_largest,
+                )
+            else:
+                kwargs.setdefault('cache', False)
+                surf_mesh = self.render_surface_mesh(**kwargs)
             surf_mesh.save(filename)
         else:
             raise ValueError(f"The filetype of extension '{ext}' is not recognized!")
