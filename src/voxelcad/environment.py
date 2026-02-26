@@ -22,8 +22,13 @@ else:
     )
 
 # EDT-based export: use Euclidean Distance Transform for smooth mesh extraction.
-# When True, export() and plot() use EDT pipeline instead of meshfix.
-use_edt_export = True
+# When True, export() uses EDT pipeline instead of meshfix.
+# Auto-detect scipy; user can override.
+try:
+    import scipy.ndimage as _scipy_ndi  # noqa: F401
+    use_edt_export = True
+except ImportError:
+    use_edt_export = False
 
 # Auto-detect tqdm for progress bars in mesh smoothing etc.
 try:

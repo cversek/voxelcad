@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-viz = ["pyvista", "vtk", "pymeshfix"]
+viz = ["pyvista", "vtk", "pymeshfix", "scipy"]
 dev = [
     "pytest",
     "pytest-benchmark",

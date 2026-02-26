@@ -325,7 +325,18 @@ class VoxelModel:
         mem0 = MEMORY_USAGE()
         if cache and self.pv_surf is not None:
             return self.pv_surf
-        from scipy.ndimage import distance_transform_edt
+        try:
+            from scipy.ndimage import distance_transform_edt
+        except ImportError:
+            import warnings
+            warnings.warn(
+                "scipy not installed — falling back to render_surface_mesh(). "
+                "Install scipy for smooth EDT-based mesh extraction: "
+                "pip install scipy",
+                RuntimeWarning, stacklevel=2)
+            TIMING_END("render_surface_mesh_edt")
+            return self.render_surface_mesh(
+                cache=cache, only_largest_component=only_largest_component)
         # Ensure volume is rendered
         if self.voxel_data is None:
             self.render_volume()
