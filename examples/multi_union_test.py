@@ -18,9 +18,9 @@ cubes = [Cube(CUBE_SIZE).translate([0, 0, i * Z_SPACING]) for i in range(NUM)]
 model = union_all(cubes)
 
 
-def export(filename="multi_union.stl", show=False):
-    print("Rendering surface model...")
-    model_surf = model.render_surface_mesh()
+def export(filename="multi_union.stl", show=True):
+    print("Rendering surface model via EDT...")
+    model_surf = model.render_surface_mesh_edt()
     model_surf.save(filename)
     print(f"Saved: {filename}")
     if show:

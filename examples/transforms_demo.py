@@ -28,3 +28,6 @@ model = stacked | pillar.translate([0, 0, 5]) | disk.translate([0, 0, 20])
 print("Rendering and exporting transforms demo...")
 model.export("transforms_demo.stl")
 print("Saved: transforms_demo.stl")
+
+# Visualize the smooth EDT surface
+model.plot(mode="surf")

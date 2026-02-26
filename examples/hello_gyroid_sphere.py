@@ -24,10 +24,10 @@ gyroid = GyroidCube(12, center=True, lattice_param=1.5,
 # Intersect: keep only the gyroid inside the sphere
 model = sphere & gyroid
 
-# Export to STL (skip meshfix — gyroid surfaces are slow to repair)
+# Export to STL via EDT pipeline (smooth, fast, no meshfix needed)
 print("Rendering and exporting gyroid sphere...")
-model.export("hello_gyroid_sphere.stl",
-             use_meshfix=False,
-             smooth_iters=200,
-             only_largest_component=True)
+model.export("hello_gyroid_sphere.stl", only_largest_component=True)
 print("Saved: hello_gyroid_sphere.stl")
+
+# Visualize the smooth EDT surface
+model.plot(mode="surf")

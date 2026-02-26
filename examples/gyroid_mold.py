@@ -35,12 +35,9 @@ model = (base | neck) | body
 mold = Cylinder(h=MOLD_H, r=MOLD_R) - model.translate([0, 0, -2])
 
 
-def export(filename="gyroid_mold.stl", show=False):
-    print("Rendering surface model...")
-    model_surf = mold.render_surface_mesh(
-        smooth_iters=500,
-        only_largest_component=True,
-    )
+def export(filename="gyroid_mold.stl", show=True):
+    print("Rendering surface model via EDT...")
+    model_surf = mold.render_surface_mesh_edt(only_largest_component=True)
     model_surf.save(filename)
     print(f"Saved: {filename}")
     if show:
