@@ -426,6 +426,140 @@ class VoxelModel:
         TIMING_END("render_surface_mesh_edt")
         return pv_surf
 
+    def analyze_spectrum(self, lowpass_cutoff=0.25, plot=True,
+                         save_path=None, n_bins=None):
+        """Analyze the SDF's frequency content with optional plots.
+
+        Computes the signed distance field, then analyzes its radial
+        power spectrum to estimate bandwidth and safe stride values.
+
+        Parameters
+        ----------
+        lowpass_cutoff : float
+            Butterworth cutoff for comparison. Default 0.25.
+        plot : bool
+            If True, generate diagnostic PNG plots.
+        save_path : str, optional
+            Directory to save plots. Defaults to current directory.
+        n_bins : int, optional
+            Radial frequency bins.
+
+        Returns
+        -------
+        dict
+            Keys: ``freq_bins``, ``power``, ``bandwidth_99``,
+            ``bandwidth_95``, ``recommended_cutoff``, ``safe_stride``,
+            ``sdf_raw`` (the raw SDF array for further analysis).
+        """
+        from scipy.ndimage import distance_transform_edt as edt
+        from .utils.spectral import (
+            radial_power_spectrum, estimate_bandwidth,
+            safe_stride, recommend_cutoff,
+            plot_radial_spectrum, plot_filter_effect,
+            plot_spectrum_slices, plot_cumulative_energy,
+        )
+
+        if self.voxel_data is None:
+            self.render_volume()
+
+        V = self._unpack_volume()
+        LOGGER.info(f"analyze_spectrum: computing SDF on {V.shape} volume...")
+        dist = edt(V) - edt(~V)
+        del V
+        dist = dist.astype(np.float32)
+
+        freq_bins, power = radial_power_spectrum(dist, n_bins=n_bins)
+        bw99 = estimate_bandwidth(freq_bins, power, 0.99)
+        bw95 = estimate_bandwidth(freq_bins, power, 0.95)
+        rec_cutoff = recommend_cutoff(freq_bins, power, method='energy')
+        stride = safe_stride(bw99)
+
+        LOGGER.info(f"  bandwidth_99 = {bw99:.4f} cyc/vox")
+        LOGGER.info(f"  bandwidth_95 = {bw95:.4f} cyc/vox")
+        LOGGER.info(f"  recommended_cutoff = {rec_cutoff:.4f}")
+        LOGGER.info(f"  safe_stride = {stride}")
+
+        result = dict(
+            freq_bins=freq_bins, power=power,
+            bandwidth_99=bw99, bandwidth_95=bw95,
+            recommended_cutoff=rec_cutoff, safe_stride=stride,
+            sdf_raw=dist,
+        )
+
+        if plot:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            import os
+
+            save_dir = save_path or '.'
+            name = self.__class__.__name__
+            res = self.grid.res_vector[0]
+
+            # 1. Radial power spectrum
+            fig = plot_radial_spectrum(
+                freq_bins, power, cutoff=lowpass_cutoff,
+                bandwidth=bw99,
+                title=f'{name} {res}^3 — Radial Power Spectrum')
+            path = os.path.join(save_dir,
+                                f'spectrum_{name}_{res}.png')
+            fig.savefig(path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            LOGGER.info(f"  saved: {path}")
+
+            # 2. Cumulative energy
+            markers = {
+                f'cutoff ({lowpass_cutoff})': lowpass_cutoff,
+                f'bw99 ({bw99:.3f})': bw99,
+            }
+            fig = plot_cumulative_energy(
+                freq_bins, power, markers=markers,
+                title=f'{name} {res}^3 — Cumulative Energy')
+            path = os.path.join(save_dir,
+                                f'cumulative_{name}_{res}.png')
+            fig.savefig(path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            LOGGER.info(f"  saved: {path}")
+
+            # 3. 2D spectrum slices
+            fig = plot_spectrum_slices(
+                dist, title_prefix=f'{name} {res}^3')
+            path = os.path.join(save_dir,
+                                f'slices_{name}_{res}.png')
+            fig.savefig(path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            LOGGER.info(f"  saved: {path}")
+
+            # 4. Filter effect (before/after Butterworth)
+            from scipy.fft import rfftn, irfftn, fftfreq, rfftfreq
+            rx, ry, rz = dist.shape
+            fx = fftfreq(rx)
+            fy = fftfreq(ry)
+            fz = rfftfreq(rz)
+            FX, FY, FZ = np.meshgrid(fx, fy, fz, indexing='ij')
+            freq_mag = np.sqrt(FX**2 + FY**2 + FZ**2)
+            H = (1.0 / (1.0 + (freq_mag / lowpass_cutoff)**4)
+                 ).astype(np.float32)
+            del FX, FY, FZ, freq_mag
+            D_fft = rfftn(dist)
+            D_fft *= H
+            del H
+            dist_filt = irfftn(D_fft, s=(rx, ry, rz))
+            del D_fft
+
+            fig = plot_filter_effect(
+                dist, dist_filt, cutoff=lowpass_cutoff,
+                n_bins=n_bins,
+                title=f'{name} {res}^3 — Filter Effect')
+            path = os.path.join(save_dir,
+                                f'filter_{name}_{res}.png')
+            fig.savefig(path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            LOGGER.info(f"  saved: {path}")
+            del dist_filt
+
+        return result
+
     def plot(self, *args, mode="volume", **kwargs):
         """Plot the model.
 
