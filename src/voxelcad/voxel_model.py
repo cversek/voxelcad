@@ -348,15 +348,16 @@ class VoxelModel:
         V = self._unpack_volume()
         _t0 = time.time()
         LOGGER.info(f"\tcomputing SDF on {V.shape} volume...")
-        sdf = distance_transform_edt(V) - distance_transform_edt(~V)
+        dist = distance_transform_edt(V) - distance_transform_edt(~V)
         del V  # free bool volume
+        dist = dist.astype(np.float32)
         LOGGER.info(f"\t...SDF completed in {time.time()-_t0:.1f} s")
         # Butterworth low-pass filter in frequency domain
         if lowpass_cutoff > 0:
             _t0 = time.time()
             LOGGER.info(f"\tFFT low-pass filter (cutoff={lowpass_cutoff})...")
             from scipy.fft import rfftn, irfftn, fftfreq, rfftfreq
-            rx, ry, rz = sdf.shape
+            rx, ry, rz = dist.shape
             fx = fftfreq(rx)
             fy = fftfreq(ry)
             fz = rfftfreq(rz)  # half-spectrum for real FFT
@@ -365,12 +366,12 @@ class VoxelModel:
             # Butterworth order-2 for sharp but smooth rolloff
             H = (1.0 / (1.0 + (freq_mag / lowpass_cutoff)**4)).astype(np.float32)
             del FX, FY, FZ, freq_mag
-            SDF_fft = rfftn(sdf)
-            del sdf
-            SDF_fft *= H
+            D_fft = rfftn(dist)
+            del dist
+            D_fft *= H
             del H
-            sdf = irfftn(SDF_fft, s=(rx, ry, rz))
-            del SDF_fft
+            dist = irfftn(D_fft, s=(rx, ry, rz))
+            del D_fft
             LOGGER.info(f"\t...filtering completed in {time.time()-_t0:.1f} s")
         # Build PyVista uniform grid from SDF (point data for contour)
         rv = self.grid.res_vector
@@ -378,12 +379,12 @@ class VoxelModel:
         ugrid = UniformGrid()
         ugrid.dimensions = rv  # point grid matches SDF array shape
         ugrid.spacing = vsv
-        ugrid.point_data['sdf'] = sdf.ravel(order='F').astype(np.float32)
-        del sdf  # free float64 SDF
+        ugrid.point_data['dist'] = dist.ravel(order='F').astype(np.float32)
+        del dist
         # Marching cubes via contour on the signed distance field
         _t0 = time.time()
         LOGGER.info(f"\textracting isosurface at isovalue={isovalue}...")
-        pv_surf = ugrid.contour([isovalue], scalars='sdf')
+        pv_surf = ugrid.contour([isovalue], scalars='dist')
         del ugrid  # free grid
         LOGGER.info(f"\t...contour completed in {time.time()-_t0:.1f} s")
         if only_largest_component and pv_surf.n_points > 0:
