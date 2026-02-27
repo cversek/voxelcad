@@ -376,8 +376,9 @@ class VoxelModel:
             fz = rfftfreq(rz)  # half-spectrum for real FFT
             FX, FY, FZ = np.meshgrid(fx, fy, fz, indexing='ij')
             freq_mag = np.sqrt(FX**2 + FY**2 + FZ**2)
-            # Butterworth order-2 for sharp but smooth rolloff
-            H = (1.0 / (1.0 + (freq_mag / lowpass_cutoff)**4)).astype(np.float32)
+            # Butterworth order-4: sharper transition than ord-2, better
+            # staircase suppression without Gibbs ringing artifacts
+            H = (1.0 / (1.0 + (freq_mag / lowpass_cutoff)**8)).astype(np.float32)
             del FX, FY, FZ, freq_mag
             D_fft = rfftn(dist)
             del dist
@@ -538,7 +539,7 @@ class VoxelModel:
             fz = rfftfreq(rz)
             FX, FY, FZ = np.meshgrid(fx, fy, fz, indexing='ij')
             freq_mag = np.sqrt(FX**2 + FY**2 + FZ**2)
-            H = (1.0 / (1.0 + (freq_mag / lowpass_cutoff)**4)
+            H = (1.0 / (1.0 + (freq_mag / lowpass_cutoff)**8)
                  ).astype(np.float32)
             del FX, FY, FZ, freq_mag
             D_fft = rfftn(dist)

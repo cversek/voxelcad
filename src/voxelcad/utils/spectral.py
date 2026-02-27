@@ -80,11 +80,17 @@ def estimate_bandwidth(freq_bins, power, energy_fraction=0.99):
         Frequency (cycles/voxel) below which ``energy_fraction``
         of total power resides.
     """
-    cumulative = np.cumsum(power)
+    # Skip bin 0 (DC component) — DC dominates total energy and
+    # tells us nothing about geometry feature bandwidth.
+    if len(power) < 2:
+        return 0.0
+    ac_power = power[1:]  # AC components only
+    ac_freq = freq_bins[1:]
+    cumulative = np.cumsum(ac_power)
     if cumulative[-1] == 0:
         return 0.0
     idx = np.searchsorted(cumulative, cumulative[-1] * energy_fraction)
-    return freq_bins[min(idx, len(freq_bins) - 1)]
+    return ac_freq[min(idx, len(ac_freq) - 1)]
 
 
 def safe_stride(bandwidth, safety_margin=1.2):
