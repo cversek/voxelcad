@@ -302,7 +302,8 @@ class VoxelModel:
         return pv_surf
 
     def render_surface_mesh_edt(self, isovalue=0.0, lowpass_cutoff=0.25,
-                                cache=True, only_largest_component=False):
+                                cache=True, only_largest_component=False,
+                                target_reduction=0.0):
         """Extract smooth surface mesh using a signed distance field.
 
         Computes EDT on both interior and exterior of the binary volume
@@ -319,6 +320,9 @@ class VoxelModel:
             cache: If True, cache the result in self.pv_surf.
             only_largest_component: If True, keep only the largest
                 connected component.
+            target_reduction: Fraction of triangles to remove (0.0-0.95).
+                0.0 = no decimation (default), 0.9 = reduce to 10%.
+                Uses quadric error metric decimation (single pass).
 
         Returns:
             PyVista PolyData surface mesh.
@@ -389,6 +393,14 @@ class VoxelModel:
         LOGGER.info(f"\t...contour completed in {time.time()-_t0:.1f} s")
         if only_largest_component and pv_surf.n_points > 0:
             pv_surf = pv_surf.extract_largest()
+        if target_reduction > 0 and pv_surf.n_cells > 0:
+            _t0 = time.time()
+            n_before = pv_surf.n_cells
+            LOGGER.info(f"\tdecimating mesh ({n_before} tris, "
+                        f"target_reduction={target_reduction})...")
+            pv_surf = pv_surf.decimate(target_reduction)
+            LOGGER.info(f"\t...decimated to {pv_surf.n_cells} tris "
+                        f"in {time.time()-_t0:.2f} s")
         if cache:
             self.pv_surf = pv_surf
         t1 = time.time()
@@ -403,11 +415,14 @@ class VoxelModel:
 
         Args:
             mode: "volume" for voxel volume mesh, "surf" for EDT surface mesh.
+            target_reduction: (surf mode only) Fraction of triangles to remove.
             *args, **kwargs: Passed to PyVista plot().
         """
         kwargs['color'] = kwargs.get('color', 'white')
         if mode == "surf":
-            surf = self.render_surface_mesh_edt()
+            target_reduction = kwargs.pop('target_reduction', 0.0)
+            surf = self.render_surface_mesh_edt(
+                target_reduction=target_reduction)
             surf.plot(*args, **kwargs)
         else:
             vol_mesh = self.render_volume_mesh()
@@ -423,11 +438,13 @@ class VoxelModel:
                 lowpass_cutoff = kwargs.pop('lowpass_cutoff', 0.25)
                 only_largest = kwargs.pop('only_largest_component', False)
                 cache = kwargs.pop('cache', True)
+                target_reduction = kwargs.pop('target_reduction', 0.0)
                 surf_mesh = self.render_surface_mesh_edt(
                     isovalue=isovalue,
                     lowpass_cutoff=lowpass_cutoff,
                     cache=cache,
                     only_largest_component=only_largest,
+                    target_reduction=target_reduction,
                 )
             else:
                 kwargs.setdefault('cache', False)

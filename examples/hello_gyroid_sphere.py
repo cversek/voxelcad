@@ -29,5 +29,10 @@ print("Rendering and exporting gyroid sphere...")
 model.export("hello_gyroid_sphere.stl", only_largest_component=True)
 print("Saved: hello_gyroid_sphere.stl")
 
+# Export a decimated version for smaller file size (90% triangle reduction)
+model.export("hello_gyroid_sphere_decimated.stl",
+             only_largest_component=True, target_reduction=0.9)
+print("Saved: hello_gyroid_sphere_decimated.stl")
+
 # Visualize the smooth EDT surface
 model.plot(mode="surf")
