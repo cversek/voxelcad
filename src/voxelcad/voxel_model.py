@@ -422,17 +422,28 @@ class VoxelModel:
             target_reduction: (surf mode only) Fraction of triangles to remove.
             *args, **kwargs: Passed to PyVista plot().
         """
+        t0 = time.time()
+        LOGGER.info(f"{self.__class__.__name__} -> plot(mode={mode!r})")
         kwargs['color'] = kwargs.get('color', 'white')
         if mode == "surf":
             target_reduction = kwargs.pop('target_reduction', 0.0)
             surf = self.render_surface_mesh_edt(
                 target_reduction=target_reduction)
+            LOGGER.info(f"\tplotting surface ({surf.n_cells} tris)...")
+            _t0 = time.time()
             surf.plot(*args, **kwargs)
+            LOGGER.info(f"\t...plot completed in {time.time()-_t0:.1f} s")
         else:
             vol_mesh = self.render_volume_mesh()
+            LOGGER.info(f"\tplotting volume mesh...")
+            _t0 = time.time()
             vol_mesh.plot(*args, **kwargs)
+            LOGGER.info(f"\t...plot completed in {time.time()-_t0:.1f} s")
+        LOGGER.info(f"END plot, total time: {time.time()-t0:.1f} s")
 
     def export(self, filename, **kwargs):
+        t0 = time.time()
+        LOGGER.info(f"{self.__class__.__name__} -> export({filename!r})")
         basepath, ext = os.path.splitext(filename)
         if ext == ".stl":
             if ENV.use_edt_export:
@@ -453,9 +464,13 @@ class VoxelModel:
             else:
                 kwargs.setdefault('cache', False)
                 surf_mesh = self.render_surface_mesh(**kwargs)
+            _t0 = time.time()
+            LOGGER.info(f"\tsaving STL ({surf_mesh.n_cells} tris)...")
             surf_mesh.save(filename)
+            LOGGER.info(f"\t...save completed in {time.time()-_t0:.2f} s")
         else:
             raise ValueError(f"The filetype of extension '{ext}' is not recognized!")
+        LOGGER.info(f"END export, total time: {time.time()-t0:.1f} s")
 
     def test_points(self, X, Y, Z):
         """Test if points defined by arrays X, Y, Z are in the volume."""
