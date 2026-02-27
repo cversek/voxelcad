@@ -301,19 +301,22 @@ class VoxelModel:
         TIMING_END("render_surface_mesh")
         return pv_surf
 
-    def render_surface_mesh_edt(self, isovalue=0.0, cache=True,
-                                only_largest_component=False):
+    def render_surface_mesh_edt(self, isovalue=0.0, smooth_iters=100,
+                                cache=True, only_largest_component=False):
         """Extract smooth surface mesh using a signed distance field.
 
         Computes EDT on both interior and exterior of the binary volume
         to build a signed distance field (SDF = interior - exterior),
-        then runs marching cubes on the SDF.  The gradient extends
-        smoothly on both sides of the surface, so marching cubes
-        produces inherently smooth, manifold meshes without meshfix.
+        then runs marching cubes on the SDF.  The resulting mesh is
+        inherently manifold (no meshfix needed).  Optional Laplacian
+        smoothing removes voxel staircases without destroying topology.
 
         Args:
             isovalue: SDF threshold for isosurface extraction.
                 0.0 = exact boundary (default), positive = erode inward.
+            smooth_iters: Laplacian smoothing iterations on the
+                extracted mesh.  Higher values = smoother surface.
+                0 disables smoothing.
             cache: If True, cache the result in self.pv_surf.
             only_largest_component: If True, keep only the largest
                 connected component.
@@ -365,6 +368,12 @@ class VoxelModel:
         LOGGER.info(f"\t...contour completed in {time.time()-_t0:.1f} s")
         if only_largest_component and pv_surf.n_points > 0:
             pv_surf = pv_surf.extract_largest()
+        if smooth_iters > 0 and pv_surf.n_points > 0:
+            _t0 = time.time()
+            LOGGER.info(f"\tLaplacian smoothing ({smooth_iters} iters)...")
+            pv_surf = pv_surf.smooth(n_iter=smooth_iters,
+                                     progress_bar=ENV.progress_bar)
+            LOGGER.info(f"\t...smoothing completed in {time.time()-_t0:.1f} s")
         if cache:
             self.pv_surf = pv_surf
         t1 = time.time()
@@ -396,10 +405,12 @@ class VoxelModel:
                 # EDT pipeline: extract isovalue and only_largest_component,
                 # pass remaining kwargs for future extensibility
                 isovalue = kwargs.pop('isovalue', 0.0)
+                smooth_iters = kwargs.pop('smooth_iters', 100)
                 only_largest = kwargs.pop('only_largest_component', False)
                 cache = kwargs.pop('cache', True)
                 surf_mesh = self.render_surface_mesh_edt(
                     isovalue=isovalue,
+                    smooth_iters=smooth_iters,
                     cache=cache,
                     only_largest_component=only_largest,
                 )
