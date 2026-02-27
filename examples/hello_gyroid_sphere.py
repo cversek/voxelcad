@@ -10,9 +10,8 @@ Usage:
 """
 from voxelcad import Sphere, GyroidCube, ENV
 
-# Resolution: smaller voxel_size = finer detail, more memory
-# 0.05 mm on a 10 mm sphere -> 200^3 grid (~1 MB packed)
-ENV.voxel_size = 0.05  # mm
+# Resolution: 0.025 mm on a 12 mm cube -> ~480^3 grid
+ENV.voxel_size = 0.025  # mm
 
 # A sphere of radius 5 mm
 sphere = Sphere(r=5)
@@ -34,5 +33,8 @@ model.export("hello_gyroid_sphere_decimated.stl",
              only_largest_component=True, target_reduction=0.9)
 print("Saved: hello_gyroid_sphere_decimated.stl")
 
-# Visualize the smooth EDT surface
-model.plot(mode="surf")
+# Visualize: full resolution surface with edges
+model.plot(mode="surf", show_edges=True)
+
+# Visualize: decimated surface with edges for comparison
+model.plot(mode="surf", show_edges=True, target_reduction=0.9)

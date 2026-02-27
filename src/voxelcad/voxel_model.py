@@ -332,6 +332,8 @@ class VoxelModel:
         LOGGER.info(f"{self.__class__.__name__} -> render_surface_mesh_edt")
         mem0 = MEMORY_USAGE()
         if cache and self.pv_surf is not None:
+            if target_reduction > 0 and self.pv_surf.n_cells > 0:
+                return self.pv_surf.decimate(target_reduction)
             return self.pv_surf
         try:
             from scipy.ndimage import distance_transform_edt
@@ -393,6 +395,10 @@ class VoxelModel:
         LOGGER.info(f"\t...contour completed in {time.time()-_t0:.1f} s")
         if only_largest_component and pv_surf.n_points > 0:
             pv_surf = pv_surf.extract_largest()
+        # Cache the full-resolution mesh before decimation
+        if cache:
+            self.pv_surf = pv_surf
+        # Decimate after caching so cached mesh stays full-res
         if target_reduction > 0 and pv_surf.n_cells > 0:
             _t0 = time.time()
             n_before = pv_surf.n_cells
@@ -401,8 +407,6 @@ class VoxelModel:
             pv_surf = pv_surf.decimate(target_reduction)
             LOGGER.info(f"\t...decimated to {pv_surf.n_cells} tris "
                         f"in {time.time()-_t0:.2f} s")
-        if cache:
-            self.pv_surf = pv_surf
         t1 = time.time()
         LOGGER.info(f"END render_surface_mesh_edt, time: {t1-t0:.1f} s")
         mem = MEMORY_USAGE(offset=mem0)
