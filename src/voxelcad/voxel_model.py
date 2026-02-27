@@ -301,22 +301,21 @@ class VoxelModel:
         TIMING_END("render_surface_mesh")
         return pv_surf
 
-    def render_surface_mesh_edt(self, isovalue=0.0, smooth_iters=100,
+    def render_surface_mesh_edt(self, isovalue=0.0, lowpass_cutoff=0.25,
                                 cache=True, only_largest_component=False):
         """Extract smooth surface mesh using a signed distance field.
 
         Computes EDT on both interior and exterior of the binary volume
         to build a signed distance field (SDF = interior - exterior),
-        then runs marching cubes on the SDF.  The resulting mesh is
-        inherently manifold (no meshfix needed).  Optional Laplacian
-        smoothing removes voxel staircases without destroying topology.
+        applies a Butterworth low-pass filter in the frequency domain
+        to remove voxel staircase artifacts, then runs marching cubes.
 
         Args:
             isovalue: SDF threshold for isosurface extraction.
                 0.0 = exact boundary (default), positive = erode inward.
-            smooth_iters: Laplacian smoothing iterations on the
-                extracted mesh.  Higher values = smoother surface.
-                0 disables smoothing.
+            lowpass_cutoff: Cutoff frequency as fraction of Nyquist
+                (0.0-0.5 cycles/voxel).  Removes staircase artifacts
+                above this frequency.  0 disables filtering.
             cache: If True, cache the result in self.pv_surf.
             only_largest_component: If True, keep only the largest
                 connected component.
@@ -352,6 +351,27 @@ class VoxelModel:
         sdf = distance_transform_edt(V) - distance_transform_edt(~V)
         del V  # free bool volume
         LOGGER.info(f"\t...SDF completed in {time.time()-_t0:.1f} s")
+        # Butterworth low-pass filter in frequency domain
+        if lowpass_cutoff > 0:
+            _t0 = time.time()
+            LOGGER.info(f"\tFFT low-pass filter (cutoff={lowpass_cutoff})...")
+            from scipy.fft import rfftn, irfftn, fftfreq, rfftfreq
+            rx, ry, rz = sdf.shape
+            fx = fftfreq(rx)
+            fy = fftfreq(ry)
+            fz = rfftfreq(rz)  # half-spectrum for real FFT
+            FX, FY, FZ = np.meshgrid(fx, fy, fz, indexing='ij')
+            freq_mag = np.sqrt(FX**2 + FY**2 + FZ**2)
+            # Butterworth order-2 for sharp but smooth rolloff
+            H = (1.0 / (1.0 + (freq_mag / lowpass_cutoff)**4)).astype(np.float32)
+            del FX, FY, FZ, freq_mag
+            SDF_fft = rfftn(sdf)
+            del sdf
+            SDF_fft *= H
+            del H
+            sdf = irfftn(SDF_fft, s=(rx, ry, rz))
+            del SDF_fft
+            LOGGER.info(f"\t...filtering completed in {time.time()-_t0:.1f} s")
         # Build PyVista uniform grid from SDF (point data for contour)
         rv = self.grid.res_vector
         vsv = self.grid.voxel_size_vector
@@ -368,12 +388,6 @@ class VoxelModel:
         LOGGER.info(f"\t...contour completed in {time.time()-_t0:.1f} s")
         if only_largest_component and pv_surf.n_points > 0:
             pv_surf = pv_surf.extract_largest()
-        if smooth_iters > 0 and pv_surf.n_points > 0:
-            _t0 = time.time()
-            LOGGER.info(f"\tLaplacian smoothing ({smooth_iters} iters)...")
-            pv_surf = pv_surf.smooth(n_iter=smooth_iters,
-                                     progress_bar=ENV.progress_bar)
-            LOGGER.info(f"\t...smoothing completed in {time.time()-_t0:.1f} s")
         if cache:
             self.pv_surf = pv_surf
         t1 = time.time()
@@ -405,12 +419,12 @@ class VoxelModel:
                 # EDT pipeline: extract isovalue and only_largest_component,
                 # pass remaining kwargs for future extensibility
                 isovalue = kwargs.pop('isovalue', 0.0)
-                smooth_iters = kwargs.pop('smooth_iters', 100)
+                lowpass_cutoff = kwargs.pop('lowpass_cutoff', 0.25)
                 only_largest = kwargs.pop('only_largest_component', False)
                 cache = kwargs.pop('cache', True)
                 surf_mesh = self.render_surface_mesh_edt(
                     isovalue=isovalue,
-                    smooth_iters=smooth_iters,
+                    lowpass_cutoff=lowpass_cutoff,
                     cache=cache,
                     only_largest_component=only_largest,
                 )
