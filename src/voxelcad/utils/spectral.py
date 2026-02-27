@@ -36,7 +36,7 @@ def radial_power_spectrum(volume, n_bins=None):
     """
     rx, ry, rz = volume.shape
     if n_bins is None:
-        n_bins = min(rx, ry, rz) // 2
+        n_bins = min(rx, ry, rz) * 2
 
     F = rfftn(volume)
     P = np.abs(F) ** 2
@@ -343,4 +343,246 @@ def plot_cumulative_energy(freq_bins, power, markers=None, ax=None,
     ax.set_ylim(0, 1.05)
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Filter zoo — transfer functions for comparison
+# ---------------------------------------------------------------------------
+
+def _freq_grid_3d(shape):
+    """Build 3D radial frequency magnitude grid for rFFT output."""
+    rx, ry, rz = shape
+    fx = fftfreq(rx)
+    fy = fftfreq(ry)
+    fz = rfftfreq(rz)
+    FX, FY, FZ = np.meshgrid(fx, fy, fz, indexing='ij')
+    freq_mag = np.sqrt(FX**2 + FY**2 + FZ**2)
+    del FX, FY, FZ
+    return freq_mag
+
+
+def make_filter(name, cutoff, shape):
+    """Create a 3D frequency-domain filter (transfer function).
+
+    Parameters
+    ----------
+    name : str
+        Filter type. One of:
+
+        - ``'butterworth2'`` — Butterworth order 2 (current default)
+        - ``'butterworth4'`` — Butterworth order 4 (sharper rolloff)
+        - ``'butterworth8'`` — Butterworth order 8 (near brick-wall)
+        - ``'gaussian'`` — Gaussian low-pass (sigma = cutoff)
+        - ``'brick'`` — Ideal brick-wall (hard zero above cutoff)
+        - ``'hann'`` — Hann (raised cosine) window, transition
+          from cutoff*0.5 to cutoff*1.5
+        - ``'tukey'`` — Tukey window (flat passband, cosine taper),
+          transition from cutoff to cutoff*2
+
+    cutoff : float
+        Cutoff frequency in cycles/voxel.
+    shape : tuple of int
+        Volume shape (rx, ry, rz) — used to build frequency grid.
+
+    Returns
+    -------
+    H : np.ndarray
+        Transfer function, shape matching rfftn output.
+    """
+    freq_mag = _freq_grid_3d(shape)
+
+    if name == 'butterworth2':
+        H = 1.0 / (1.0 + (freq_mag / cutoff) ** 4)
+    elif name == 'butterworth4':
+        H = 1.0 / (1.0 + (freq_mag / cutoff) ** 8)
+    elif name == 'butterworth8':
+        H = 1.0 / (1.0 + (freq_mag / cutoff) ** 16)
+    elif name == 'gaussian':
+        H = np.exp(-0.5 * (freq_mag / cutoff) ** 2)
+    elif name == 'brick':
+        H = (freq_mag <= cutoff).astype(np.float32)
+    elif name == 'hann':
+        lo = cutoff * 0.5
+        hi = cutoff * 1.5
+        H = np.ones_like(freq_mag)
+        trans = (freq_mag > lo) & (freq_mag <= hi)
+        H[trans] = 0.5 * (1.0 + np.cos(
+            np.pi * (freq_mag[trans] - lo) / (hi - lo)))
+        H[freq_mag > hi] = 0.0
+    elif name == 'tukey':
+        lo = cutoff
+        hi = cutoff * 2.0
+        H = np.ones_like(freq_mag)
+        trans = (freq_mag > lo) & (freq_mag <= hi)
+        H[trans] = 0.5 * (1.0 + np.cos(
+            np.pi * (freq_mag[trans] - lo) / (hi - lo)))
+        H[freq_mag > hi] = 0.0
+    else:
+        raise ValueError(f"Unknown filter: {name!r}")
+
+    return H.astype(np.float32)
+
+
+def apply_filter(volume, name, cutoff):
+    """Apply a named filter to a 3D volume in the frequency domain.
+
+    Parameters
+    ----------
+    volume : np.ndarray
+        3D float array.
+    name : str
+        Filter name (see ``make_filter``).
+    cutoff : float
+        Cutoff frequency in cycles/voxel.
+
+    Returns
+    -------
+    np.ndarray
+        Filtered volume (same shape as input).
+    """
+    from scipy.fft import irfftn
+    H = make_filter(name, cutoff, volume.shape)
+    F = rfftn(volume)
+    F *= H
+    return irfftn(F, s=volume.shape)
+
+
+FILTER_ZOO = [
+    ('butterworth2', 'Butterworth ord-2'),
+    ('butterworth4', 'Butterworth ord-4'),
+    ('butterworth8', 'Butterworth ord-8'),
+    ('gaussian',     'Gaussian'),
+    ('brick',        'Brick-wall (ideal)'),
+    ('hann',         'Hann window'),
+    ('tukey',        'Tukey window'),
+]
+
+
+def plot_filter_transfer_functions(cutoff=0.25, ax=None, title=None):
+    """Plot 1D transfer function profiles for all filters in the zoo.
+
+    Shows the gain vs frequency for each filter type at the given cutoff,
+    evaluated along a single axis (1D cross-section through 3D filter).
+
+    Parameters
+    ----------
+    cutoff : float
+        Cutoff frequency.
+    ax : matplotlib Axes, optional
+    title : str, optional
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 6))
+    else:
+        fig = ax.figure
+
+    f = np.linspace(0, 0.55, 500)
+
+    for name, label in FILTER_ZOO:
+        if name == 'butterworth2':
+            H = 1.0 / (1.0 + (f / cutoff) ** 4)
+        elif name == 'butterworth4':
+            H = 1.0 / (1.0 + (f / cutoff) ** 8)
+        elif name == 'butterworth8':
+            H = 1.0 / (1.0 + (f / cutoff) ** 16)
+        elif name == 'gaussian':
+            H = np.exp(-0.5 * (f / cutoff) ** 2)
+        elif name == 'brick':
+            H = (f <= cutoff).astype(float)
+        elif name == 'hann':
+            lo, hi = cutoff * 0.5, cutoff * 1.5
+            H = np.ones_like(f)
+            trans = (f > lo) & (f <= hi)
+            H[trans] = 0.5 * (1 + np.cos(np.pi * (f[trans] - lo) / (hi - lo)))
+            H[f > hi] = 0.0
+        elif name == 'tukey':
+            lo, hi = cutoff, cutoff * 2.0
+            H = np.ones_like(f)
+            trans = (f > lo) & (f <= hi)
+            H[trans] = 0.5 * (1 + np.cos(np.pi * (f[trans] - lo) / (hi - lo)))
+            H[f > hi] = 0.0
+        ax.plot(f, H, linewidth=1.5, label=label)
+
+    ax.axvline(cutoff, color='k', linestyle=':', linewidth=1,
+               label=f'cutoff ({cutoff})')
+    ax.axvline(0.5, color='0.5', linestyle=':', linewidth=0.8)
+    ax.set_xlabel('Frequency (cycles/voxel)')
+    ax.set_ylabel('Gain')
+    ax.set_title(title or f'Filter Transfer Functions (cutoff={cutoff})')
+    ax.legend(fontsize=8, ncol=2)
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(0, 0.55)
+    ax.set_ylim(-0.05, 1.1)
+    return fig
+
+
+def plot_filter_comparison(sdf, cutoff=0.25, filters=None,
+                           n_bins=None, title=None):
+    """Compare multiple filters on the same SDF: radial power spectra.
+
+    Parameters
+    ----------
+    sdf : np.ndarray
+        3D SDF (raw, before filtering).
+    cutoff : float
+        Cutoff frequency for all filters.
+    filters : list of (name, label), optional
+        Subset of FILTER_ZOO. Defaults to all.
+    n_bins : int, optional
+    title : str, optional
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    import matplotlib.pyplot as plt
+
+    if filters is None:
+        filters = FILTER_ZOO
+
+    fig, axes = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+
+    # Top: overlay filtered spectra
+    f_raw, p_raw = radial_power_spectrum(sdf, n_bins=n_bins)
+    m = p_raw > 0
+    axes[0].semilogy(f_raw[m], p_raw[m], 'k-', linewidth=2,
+                     alpha=0.4, label='Raw SDF')
+    for name, label in filters:
+        filtered = apply_filter(sdf, name, cutoff)
+        f_f, p_f = radial_power_spectrum(filtered, n_bins=n_bins)
+        mf = p_f > 0
+        axes[0].semilogy(f_f[mf], p_f[mf], linewidth=1.2, label=label)
+        del filtered
+
+    axes[0].axvline(cutoff, color='k', linestyle=':', linewidth=1)
+    axes[0].axvline(0.5, color='0.5', linestyle=':', linewidth=0.8)
+    axes[0].set_ylabel('Mean Power')
+    axes[0].set_title(title or f'Filter Comparison (cutoff={cutoff})')
+    axes[0].legend(fontsize=7, ncol=2)
+    axes[0].grid(True, alpha=0.3)
+
+    # Bottom: suppression ratio (raw / filtered) — how much each removes
+    axes[1].axhline(1.0, color='k', linewidth=0.5)
+    for name, label in filters:
+        filtered = apply_filter(sdf, name, cutoff)
+        f_f, p_f = radial_power_spectrum(filtered, n_bins=n_bins)
+        ratio = np.where(p_f > 0, p_raw / (p_f + 1e-30), 1.0)
+        axes[1].semilogy(f_f, ratio, linewidth=1.2, label=label)
+        del filtered
+
+    axes[1].axvline(cutoff, color='k', linestyle=':', linewidth=1)
+    axes[1].axvline(0.5, color='0.5', linestyle=':', linewidth=0.8)
+    axes[1].set_xlabel('Frequency (cycles/voxel)')
+    axes[1].set_ylabel('Suppression Ratio (raw/filtered)')
+    axes[1].legend(fontsize=7, ncol=2)
+    axes[1].grid(True, alpha=0.3)
+    axes[1].set_xlim(0, 0.55)
+    fig.tight_layout()
     return fig
