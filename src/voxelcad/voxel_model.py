@@ -333,7 +333,14 @@ class VoxelModel:
         mem0 = MEMORY_USAGE()
         if cache and self.pv_surf is not None:
             if target_reduction > 0 and self.pv_surf.n_cells > 0:
-                return self.pv_surf.decimate(target_reduction)
+                _t0 = time.time()
+                n_before = self.pv_surf.n_cells
+                LOGGER.info(f"\tdecimating cached mesh ({n_before} tris, "
+                            f"target_reduction={target_reduction})...")
+                result = self.pv_surf.decimate(target_reduction)
+                LOGGER.info(f"\t...decimated to {result.n_cells} tris "
+                            f"in {time.time()-_t0:.2f} s")
+                return result
             return self.pv_surf
         try:
             from scipy.ndimage import distance_transform_edt
@@ -394,7 +401,12 @@ class VoxelModel:
         del ugrid  # free grid
         LOGGER.info(f"\t...contour completed in {time.time()-_t0:.1f} s")
         if only_largest_component and pv_surf.n_points > 0:
+            _t0 = time.time()
+            LOGGER.info(f"\textracting largest component "
+                        f"({pv_surf.n_cells} tris)...")
             pv_surf = pv_surf.extract_largest()
+            LOGGER.info(f"\t...extracted ({pv_surf.n_cells} tris) "
+                        f"in {time.time()-_t0:.2f} s")
         # Cache the full-resolution mesh before decimation
         if cache:
             self.pv_surf = pv_surf
