@@ -301,17 +301,19 @@ class VoxelModel:
         TIMING_END("render_surface_mesh")
         return pv_surf
 
-    def render_surface_mesh_edt(self, isovalue=0.5, cache=True,
+    def render_surface_mesh_edt(self, isovalue=0.0, cache=True,
                                 only_largest_component=False):
-        """Extract smooth surface mesh using Euclidean Distance Transform.
+        """Extract smooth surface mesh using a signed distance field.
 
-        Computes EDT on the binary voxel volume, then runs marching cubes
-        on the smooth distance field. Produces inherently smooth, manifold
-        meshes without meshfix, smoothing, or decimation.
+        Computes EDT on both interior and exterior of the binary volume
+        to build a signed distance field (SDF = interior - exterior),
+        then runs marching cubes on the SDF.  The gradient extends
+        smoothly on both sides of the surface, so marching cubes
+        produces inherently smooth, manifold meshes without meshfix.
 
         Args:
-            isovalue: Distance field threshold for isosurface extraction.
-                Higher values produce surfaces deeper inside the volume.
+            isovalue: SDF threshold for isosurface extraction.
+                0.0 = exact boundary (default), positive = erode inward.
             cache: If True, cache the result in self.pv_surf.
             only_largest_component: If True, keep only the largest
                 connected component.
@@ -340,23 +342,26 @@ class VoxelModel:
         # Ensure volume is rendered
         if self.voxel_data is None:
             self.render_volume()
-        # Unpack to bool and compute EDT
+        # Unpack to bool and compute signed distance field
         V = self._unpack_volume()
         _t0 = time.time()
-        LOGGER.info(f"\tcomputing EDT on {V.shape} volume...")
-        dist = distance_transform_edt(V)
-        LOGGER.info(f"\t...EDT completed in {time.time()-_t0:.1f} s")
-        # Build PyVista uniform grid from distance field (point data for contour)
+        LOGGER.info(f"\tcomputing SDF on {V.shape} volume...")
+        sdf = distance_transform_edt(V) - distance_transform_edt(~V)
+        del V  # free bool volume
+        LOGGER.info(f"\t...SDF completed in {time.time()-_t0:.1f} s")
+        # Build PyVista uniform grid from SDF (point data for contour)
         rv = self.grid.res_vector
         vsv = self.grid.voxel_size_vector
         ugrid = UniformGrid()
-        ugrid.dimensions = rv  # point grid matches EDT array shape
+        ugrid.dimensions = rv  # point grid matches SDF array shape
         ugrid.spacing = vsv
-        ugrid.point_data['dist'] = dist.flatten(order='F')
-        # Marching cubes via contour on the distance field
+        ugrid.point_data['sdf'] = sdf.ravel(order='F').astype(np.float32)
+        del sdf  # free float64 SDF
+        # Marching cubes via contour on the signed distance field
         _t0 = time.time()
         LOGGER.info(f"\textracting isosurface at isovalue={isovalue}...")
-        pv_surf = ugrid.contour([isovalue], scalars='dist')
+        pv_surf = ugrid.contour([isovalue], scalars='sdf')
+        del ugrid  # free grid
         LOGGER.info(f"\t...contour completed in {time.time()-_t0:.1f} s")
         if only_largest_component and pv_surf.n_points > 0:
             pv_surf = pv_surf.extract_largest()
@@ -390,9 +395,9 @@ class VoxelModel:
             if ENV.use_edt_export:
                 # EDT pipeline: extract isovalue and only_largest_component,
                 # pass remaining kwargs for future extensibility
-                isovalue = kwargs.pop('isovalue', 0.5)
+                isovalue = kwargs.pop('isovalue', 0.0)
                 only_largest = kwargs.pop('only_largest_component', False)
-                cache = kwargs.pop('cache', False)
+                cache = kwargs.pop('cache', True)
                 surf_mesh = self.render_surface_mesh_edt(
                     isovalue=isovalue,
                     cache=cache,
