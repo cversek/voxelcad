@@ -12,18 +12,22 @@ class Cube(VoxelModel):
     def __init__(self, size, voxel_size=None, center=False, **kwargs):
         super().__init__(**kwargs)
         self.size = np.array(size)*np.ones(3)
+        # Pad grid by 1 voxel on each side so SDF zero-crossing
+        # never touches the grid boundary (adds 2 voxels per axis)
+        vs = voxel_size if voxel_size is not None else ENV.voxel_size
+        pad = float(np.atleast_1d(vs)[0])
         #set up grid dimensions
         if center:
             sx,sy,sz = self.size/2
-            self.grid = VoxelGrid(xlim=(-sx,sx),
-                                  ylim=(-sy,sy),
-                                  zlim=(-sz,sz),
+            self.grid = VoxelGrid(xlim=(-sx-pad,sx+pad),
+                                  ylim=(-sy-pad,sy+pad),
+                                  zlim=(-sz-pad,sz+pad),
                                   voxel_size=voxel_size)
         else:
             sx,sy,sz = self.size
-            self.grid = VoxelGrid(xlim=(0,sx),
-                                  ylim=(0,sy),
-                                  zlim=(0,sz),
+            self.grid = VoxelGrid(xlim=(0-pad,sx+pad),
+                                  ylim=(0-pad,sy+pad),
+                                  zlim=(0-pad,sz+pad),
                                   voxel_size=voxel_size)
 
     def _render_cython(self, grid, M4inv=None):

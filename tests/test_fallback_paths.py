@@ -34,12 +34,12 @@ def test_non_power_of_2_grid():
     c = Cube(size=10, voxel_size=0.3, center=True)
     c.render_volume()
     rx, ry, rz = c._voxel_shape
-    # ceil(10/0.3) = 34, not a power of 2
-    assert rx == 34
+    # ceil((10 + 2*0.3)/0.3) = ceil(35.33) = 36 (with 1-voxel padding per side)
+    assert rx == 36
     assert c.voxel_data is not None
     V = c._unpack_volume()
-    assert V.shape == (34, 34, 34)
-    assert V.all()  # Cube fills its own grid
+    assert V.shape == (36, 36, 36)
+    assert V[1:-1, 1:-1, 1:-1].all()  # interior is solid
 
 
 def test_empty_intersection_non_overlapping_grids():

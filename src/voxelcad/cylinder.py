@@ -24,22 +24,26 @@ class Cylinder(VoxelModel):
             self.r1 = r1
             self.r2 = r2
         self.center = center
+        # Pad grid by 1 voxel on each side so SDF zero-crossing
+        # never touches the grid boundary (adds 2 voxels per axis)
+        vs = voxel_size if voxel_size is not None else ENV.voxel_size
+        pad = float(np.atleast_1d(vs)[0])
         #set up grid dimensions
         # X and Y are always centered
         sv = self.size_vector
         if self.center:
             #center Z as well
             sx,sy,sz = sv/2
-            self.grid = VoxelGrid(xlim=(-sx,sx),
-                                  ylim=(-sy,sy),
-                                  zlim=(-sz,sz),
+            self.grid = VoxelGrid(xlim=(-sx-pad,sx+pad),
+                                  ylim=(-sy-pad,sy+pad),
+                                  zlim=(-sz-pad,sz+pad),
                                   voxel_size=voxel_size)
         else:
             # start Z at zero
             sx,sy,sz = sv
-            self.grid = VoxelGrid(xlim=(-sx,sx),
-                                  ylim=(-sy,sy),
-                                  zlim=(0,sz),
+            self.grid = VoxelGrid(xlim=(-sx-pad,sx+pad),
+                                  ylim=(-sy-pad,sy+pad),
+                                  zlim=(0-pad,sz+pad),
                                   voxel_size=voxel_size)
 
     def _render_cython(self, grid, M4inv=None):

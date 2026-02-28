@@ -6,13 +6,14 @@ from tests.conftest import LOW_RES_VS
 
 
 def test_single_voxel_grid():
-    """Very large voxel_size produces 1x1x1 grid."""
+    """Very large voxel_size produces a small grid with boundary padding."""
     c = Cube(size=10, voxel_size=20.0, center=True)
     c.render_volume()
-    assert c._voxel_shape == (1, 1, 1)
+    # With 1-voxel padding per side: ceil((10+2*20)/20) = ceil(2.5) = 3
+    assert c._voxel_shape == (3, 3, 3)
     V = c._unpack_volume()
-    assert V.shape == (1, 1, 1)
-    assert V[0, 0, 0] == True
+    assert V.shape == (3, 3, 3)
+    assert V[1, 1, 1] == True  # center voxel is solid
 
 
 def test_identity_rotation():
