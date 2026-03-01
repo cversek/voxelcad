@@ -303,13 +303,13 @@ class VoxelModel:
 
     def render_surface_mesh_edt(self, isovalue=0.0, lowpass_cutoff=0.25,
                                 cache=True, only_largest_component=False,
-                                target_reduction=0.0):
+                                target_reduction=0.0, mc_stride=1):
         """Extract smooth surface mesh using a signed distance field.
 
-        Computes EDT on both interior and exterior of the binary volume
-        to build a signed distance field (SDF = interior - exterior),
-        applies a Butterworth low-pass filter in the frequency domain
-        to remove voxel staircase artifacts, then runs marching cubes.
+        Computes a distance transform on both interior and exterior of the
+        binary volume to build a signed distance field (SDF = interior -
+        exterior), applies a Butterworth low-pass filter in the frequency
+        domain to remove voxel staircase artifacts, then runs marching cubes.
 
         Args:
             isovalue: SDF threshold for isosurface extraction.
@@ -323,6 +323,9 @@ class VoxelModel:
             target_reduction: Fraction of triangles to remove (0.0-0.95).
                 0.0 = no decimation (default), 0.9 = reduce to 10%.
                 Uses quadric error metric decimation (single pass).
+            mc_stride: Subsample factor for SDF computation. stride=2
+                computes distance transform at half resolution (8x fewer
+                voxels). Safe when geometry bandwidth < 0.5/stride.
 
         Returns:
             PyVista PolyData surface mesh.
@@ -343,7 +346,7 @@ class VoxelModel:
                 return result
             return self.pv_surf
         try:
-            from scipy.ndimage import distance_transform_edt
+            from scipy.ndimage import distance_transform_cdt
         except ImportError:
             import warnings
             warnings.warn(
@@ -357,13 +360,19 @@ class VoxelModel:
         # Ensure volume is rendered
         if self.voxel_data is None:
             self.render_volume()
-        # Unpack to bool and compute signed distance field
+        # Unpack to bool, apply stride, compute signed distance field
         V = self._unpack_volume()
+        if mc_stride > 1:
+            V = V[::mc_stride, ::mc_stride, ::mc_stride].copy()
+            # Pad with 1 voxel of empty space so SDF zero-crossing
+            # never clips at grid boundary (stride reduces padding)
+            V = np.pad(V, 1, mode='constant', constant_values=False)
         _t0 = time.time()
-        LOGGER.info(f"\tcomputing SDF on {V.shape} volume...")
-        dist = distance_transform_edt(V) - distance_transform_edt(~V)
+        LOGGER.info(f"\tcomputing CDT SDF on {V.shape} volume "
+                    f"(stride={mc_stride})...")
+        dist = distance_transform_cdt(V, metric='chessboard').astype(np.float32) \
+             - distance_transform_cdt(~V, metric='chessboard').astype(np.float32)
         del V  # free bool volume
-        dist = dist.astype(np.float32)
         LOGGER.info(f"\t...SDF completed in {time.time()-_t0:.1f} s")
         # Butterworth low-pass filter in frequency domain
         if lowpass_cutoff > 0:
@@ -388,8 +397,8 @@ class VoxelModel:
             del D_fft
             LOGGER.info(f"\t...filtering completed in {time.time()-_t0:.1f} s")
         # Build PyVista uniform grid from SDF (point data for contour)
-        rv = self.grid.res_vector
-        vsv = self.grid.voxel_size_vector
+        rv = np.array(dist.shape)  # strided resolution
+        vsv = self.grid.voxel_size_vector * mc_stride
         ugrid = UniformGrid()
         ugrid.dimensions = rv  # point grid matches SDF array shape
         ugrid.spacing = vsv
@@ -574,8 +583,9 @@ class VoxelModel:
         kwargs['color'] = kwargs.get('color', 'white')
         if mode == "surf":
             target_reduction = kwargs.pop('target_reduction', 0.0)
+            mc_stride = kwargs.pop('mc_stride', 1)
             surf = self.render_surface_mesh_edt(
-                target_reduction=target_reduction)
+                target_reduction=target_reduction, mc_stride=mc_stride)
             LOGGER.info(f"\tplotting surface ({surf.n_cells} tris)...")
             _t0 = time.time()
             surf.plot(*args, **kwargs)
@@ -601,12 +611,14 @@ class VoxelModel:
                 only_largest = kwargs.pop('only_largest_component', False)
                 cache = kwargs.pop('cache', True)
                 target_reduction = kwargs.pop('target_reduction', 0.0)
+                mc_stride = kwargs.pop('mc_stride', 1)
                 surf_mesh = self.render_surface_mesh_edt(
                     isovalue=isovalue,
                     lowpass_cutoff=lowpass_cutoff,
                     cache=cache,
                     only_largest_component=only_largest,
                     target_reduction=target_reduction,
+                    mc_stride=mc_stride,
                 )
             else:
                 kwargs.setdefault('cache', False)
