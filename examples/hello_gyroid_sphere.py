@@ -23,7 +23,7 @@ gyroid = GyroidCube(12, center=True, lattice_param=1.5,
 # Intersect: keep only the gyroid inside the sphere
 model = sphere & gyroid
 
-# Export to STL via EDT pipeline (smooth, fast, no meshfix needed)
+# Export to STL (CDT SDF + Butterworth low-pass + marching cubes)
 print("Rendering and exporting gyroid sphere...")
 model.export("hello_gyroid_sphere.stl", only_largest_component=True)
 print("Saved: hello_gyroid_sphere.stl")

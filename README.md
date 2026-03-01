@@ -76,7 +76,7 @@ python setup.py build_ext --inplace
 
 The second command compiles Cython extensions for 10-60x speedup. Without it, VoxelCAD falls back to NumPy with a warning.
 
-**Requirements**: Python 3.9+, NumPy. Optional: Cython, PyVista (visualization), pymeshfix (mesh repair).
+**Requirements**: Python 3.9+, NumPy. Optional: Cython (10-60x speedup), PyVista (visualization), scipy (CDT fallback).
 
 ## Documentation
 

@@ -242,66 +242,7 @@ class VoxelModel:
         TIMING_END("render_volume_mesh")
         return pv_vol
 
-    def render_surface_mesh(self,
-                            cache=True,
-                            use_meshfix = True,
-                            smooth_iters = 0,
-                            downscale_times = 0,
-                            only_largest_component = False,
-                            ):
-        TIMING_START("render_surface_mesh")
-        t0 = time.time()
-        LOGGER.info(40*"*")
-        LOGGER.info(f"{self.__class__} -> super().render_surface_mesh")
-        mem0 = MEMORY_USAGE()
-        LOGGER.info(f"TOTAL MEMORY USED: {mem0/2**30:0.2f} GB")
-        LOGGER.info(40*"-")
-        if cache and self.pv_surf is not None:
-            return self.pv_surf
-        import pyvista as pv
-        pv_vol  = self.render_volume_mesh()
-        pv_surf = pv_vol.extract_surface(algorithm='dataset_surface')
-        if use_meshfix:
-            _t0 = time.time()
-            LOGGER.info(f"\trunning meshfix.repair()...")
-            import pymeshfix as mf
-            meshfix = mf.MeshFix(pv_surf)
-            meshfix.repair(joincomp=True)
-            pv_surf = meshfix.mesh
-            LOGGER.info(f"\t...completed in {time.time()-_t0:0.1f} s")
-        if smooth_iters > 0:
-            _t0 = time.time()
-            LOGGER.info(f"\trunning smooth...")
-            pv_surf = pv_surf.smooth(n_iter=smooth_iters,progress_bar=ENV.progress_bar)
-            LOGGER.info(f"\t...completed in {time.time()-_t0:0.1f} s")
-        if downscale_times > 0:
-            _t0 = time.time()
-            LOGGER.info(f"\trunning downscale_trimesh...")
-            pv_surf = pv_surf.triangulate()
-            from voxelcad.utils.pyvista_tools import downscale_trimesh
-            pv_surf = downscale_trimesh(pv_surf,smooth_iters=smooth_iters,repeat=downscale_times,decimation_factor=0.5)
-            LOGGER.info(f"\t...completed in {time.time()-_t0:0.1f} s")
-            if use_meshfix:
-                _t0 = time.time()
-                LOGGER.info(f"\trunning meshfix.repair() again after downscale...")
-                import pymeshfix as mf
-                meshfix = mf.MeshFix(pv_surf)
-                meshfix.repair(joincomp=True)
-                pv_surf = meshfix.mesh
-                LOGGER.info(f"\t...completed in {time.time()-_t0:0.1f} s")
-        if only_largest_component:
-            pv_surf = pv_surf.extract_largest()
-        if cache:
-            self.pv_surf = pv_surf
-        t1 = time.time()
-        LOGGER.info(f"END render_surface_mesh, time: {t1-t0:0.1f} s")
-        mem = MEMORY_USAGE(offset=mem0)
-        LOGGER.info(f"DELTA MEMORY USED: {mem/2**30:0.2f} GB")
-        LOGGER.info(40*"*")
-        TIMING_END("render_surface_mesh")
-        return pv_surf
-
-    def render_surface_mesh_edt(self, isovalue=0.0, lowpass_cutoff=0.25,
+    def render_surface_mesh(self, isovalue=0.0, lowpass_cutoff=0.25,
                                 cache=True, only_largest_component=False,
                                 target_reduction=0.0, mc_stride=1):
         """Extract smooth surface mesh using a signed distance field.
@@ -330,9 +271,9 @@ class VoxelModel:
         Returns:
             PyVista PolyData surface mesh.
         """
-        TIMING_START("render_surface_mesh_edt")
+        TIMING_START("render_surface_mesh")
         t0 = time.time()
-        LOGGER.info(f"{self.__class__.__name__} -> render_surface_mesh_edt")
+        LOGGER.info(f"{self.__class__.__name__} -> render_surface_mesh")
         mem0 = MEMORY_USAGE()
         if cache and self.pv_surf is not None:
             if target_reduction > 0 and self.pv_surf.n_cells > 0:
@@ -366,16 +307,10 @@ class VoxelModel:
             try:
                 from scipy.ndimage import distance_transform_cdt
             except ImportError:
-                import warnings
-                warnings.warn(
-                    "scipy not installed — falling back to "
-                    "render_surface_mesh(). Install scipy for smooth "
-                    "EDT-based mesh extraction: pip install scipy",
-                    RuntimeWarning, stacklevel=2)
-                TIMING_END("render_surface_mesh_edt")
-                return self.render_surface_mesh(
-                    cache=cache,
-                    only_largest_component=only_largest_component)
+                raise ImportError(
+                    "render_surface_mesh() requires either Cython CDT "
+                    "kernel (build_ext --inplace) or scipy. "
+                    "Install scipy: pip install scipy")
             V = self._unpack_volume()
             if mc_stride > 1:
                 V = V[::mc_stride, ::mc_stride, ::mc_stride].copy()
@@ -450,10 +385,10 @@ class VoxelModel:
             LOGGER.info(f"\t...decimated to {pv_surf.n_cells} tris "
                         f"in {time.time()-_t0:.2f} s")
         t1 = time.time()
-        LOGGER.info(f"END render_surface_mesh_edt, time: {t1-t0:.1f} s")
+        LOGGER.info(f"END render_surface_mesh, time: {t1-t0:.1f} s")
         mem = MEMORY_USAGE(offset=mem0)
         LOGGER.info(f"DELTA MEMORY USED: {mem/2**30:.2f} GB")
-        TIMING_END("render_surface_mesh_edt")
+        TIMING_END("render_surface_mesh")
         return pv_surf
 
     def analyze_spectrum(self, lowpass_cutoff=0.25, plot=True,
@@ -603,8 +538,8 @@ class VoxelModel:
         kwargs['color'] = kwargs.get('color', 'white')
         if mode == "surf":
             target_reduction = kwargs.pop('target_reduction', 0.0)
-            mc_stride = kwargs.pop('mc_stride', 1)
-            surf = self.render_surface_mesh_edt(
+            mc_stride = kwargs.pop('mc_stride', 2)
+            surf = self.render_surface_mesh(
                 target_reduction=target_reduction, mc_stride=mc_stride)
             LOGGER.info(f"\tplotting surface ({surf.n_cells} tris)...")
             _t0 = time.time()
@@ -623,26 +558,20 @@ class VoxelModel:
         LOGGER.info(f"{self.__class__.__name__} -> export({filename!r})")
         basepath, ext = os.path.splitext(filename)
         if ext == ".stl":
-            if ENV.use_edt_export:
-                # EDT pipeline: extract isovalue and only_largest_component,
-                # pass remaining kwargs for future extensibility
-                isovalue = kwargs.pop('isovalue', 0.0)
-                lowpass_cutoff = kwargs.pop('lowpass_cutoff', 0.25)
-                only_largest = kwargs.pop('only_largest_component', False)
-                cache = kwargs.pop('cache', True)
-                target_reduction = kwargs.pop('target_reduction', 0.0)
-                mc_stride = kwargs.pop('mc_stride', 1)
-                surf_mesh = self.render_surface_mesh_edt(
-                    isovalue=isovalue,
-                    lowpass_cutoff=lowpass_cutoff,
-                    cache=cache,
-                    only_largest_component=only_largest,
-                    target_reduction=target_reduction,
-                    mc_stride=mc_stride,
-                )
-            else:
-                kwargs.setdefault('cache', False)
-                surf_mesh = self.render_surface_mesh(**kwargs)
+            isovalue = kwargs.pop('isovalue', 0.0)
+            lowpass_cutoff = kwargs.pop('lowpass_cutoff', 0.25)
+            only_largest = kwargs.pop('only_largest_component', False)
+            cache = kwargs.pop('cache', True)
+            target_reduction = kwargs.pop('target_reduction', 0.0)
+            mc_stride = kwargs.pop('mc_stride', 2)
+            surf_mesh = self.render_surface_mesh(
+                isovalue=isovalue,
+                lowpass_cutoff=lowpass_cutoff,
+                cache=cache,
+                only_largest_component=only_largest,
+                target_reduction=target_reduction,
+                mc_stride=mc_stride,
+            )
             _t0 = time.time()
             LOGGER.info(f"\tsaving STL ({surf_mesh.n_cells} tris)...")
             surf_mesh.save(filename)

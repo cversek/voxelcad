@@ -29,7 +29,7 @@ dynamic = ["version"]
 | Group | Contents | Install |
 |-------|----------|---------|
 | core | numpy, matplotlib | `pip install -e .` |
-| viz | pyvista, vtk, pymeshfix | `pip install -e ".[viz]"` |
+| viz | pyvista, vtk, scipy | `pip install -e ".[viz]"` |
 | dev | pytest, cython, pyvista | `pip install -e ".[dev]"` |
 
 ## setup.py
