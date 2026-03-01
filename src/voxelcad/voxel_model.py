@@ -345,54 +345,74 @@ class VoxelModel:
                             f"in {time.time()-_t0:.2f} s")
                 return result
             return self.pv_surf
-        try:
-            from scipy.ndimage import distance_transform_cdt
-        except ImportError:
-            import warnings
-            warnings.warn(
-                "scipy not installed — falling back to render_surface_mesh(). "
-                "Install scipy for smooth EDT-based mesh extraction: "
-                "pip install scipy",
-                RuntimeWarning, stacklevel=2)
-            TIMING_END("render_surface_mesh_edt")
-            return self.render_surface_mesh(
-                cache=cache, only_largest_component=only_largest_component)
         # Ensure volume is rendered
         if self.voxel_data is None:
             self.render_volume()
-        # Unpack to bool, apply stride, compute signed distance field
-        V = self._unpack_volume()
-        if mc_stride > 1:
-            V = V[::mc_stride, ::mc_stride, ::mc_stride].copy()
-            # Pad with 1 voxel of empty space so SDF zero-crossing
-            # never clips at grid boundary (stride reduces padding)
-            V = np.pad(V, 1, mode='constant', constant_values=False)
+        # Compute signed distance field via Cython CDT or scipy fallback
         _t0 = time.time()
-        LOGGER.info(f"\tcomputing CDT SDF on {V.shape} volume "
-                    f"(stride={mc_stride})...")
-        dist = distance_transform_cdt(V, metric='chessboard').astype(np.float32) \
-             - distance_transform_cdt(~V, metric='chessboard').astype(np.float32)
-        del V  # free bool volume
-        LOGGER.info(f"\t...SDF completed in {time.time()-_t0:.1f} s")
+        from voxelcad._kernels import compute_sdf_cdt as _cython_sdf_cdt
+        if _cython_sdf_cdt is not None and self.voxel_data is not None:
+            rx, ry, rz = self.grid.res_vector
+            LOGGER.info(f"\tCython CDT int8 SDF on ({rx},{ry},{rz}) "
+                        f"stride={mc_stride}...")
+            dist = _cython_sdf_cdt(self.voxel_data, rx, ry, rz, mc_stride)
+            # Kernel returns padded SDF; strip for stride=1 compatibility
+            if mc_stride == 1:
+                dist = dist[1:-1, 1:-1, 1:-1].copy()
+            LOGGER.info(f"\t...Cython CDT completed in "
+                        f"{time.time()-_t0:.1f} s, shape={dist.shape}, "
+                        f"dtype={dist.dtype}")
+        else:
+            try:
+                from scipy.ndimage import distance_transform_cdt
+            except ImportError:
+                import warnings
+                warnings.warn(
+                    "scipy not installed — falling back to "
+                    "render_surface_mesh(). Install scipy for smooth "
+                    "EDT-based mesh extraction: pip install scipy",
+                    RuntimeWarning, stacklevel=2)
+                TIMING_END("render_surface_mesh_edt")
+                return self.render_surface_mesh(
+                    cache=cache,
+                    only_largest_component=only_largest_component)
+            V = self._unpack_volume()
+            if mc_stride > 1:
+                V = V[::mc_stride, ::mc_stride, ::mc_stride].copy()
+                V = np.pad(V, 1, mode='constant', constant_values=False)
+            LOGGER.info(f"\tscipy CDT fallback on {V.shape} volume "
+                        f"(stride={mc_stride})...")
+            dist = (distance_transform_cdt(V, metric='chessboard')
+                    .astype(np.float32)
+                    - distance_transform_cdt(~V, metric='chessboard')
+                    .astype(np.float32))
+            del V
+            LOGGER.info(f"\t...scipy CDT completed in "
+                        f"{time.time()-_t0:.1f} s, shape={dist.shape}, "
+                        f"dtype={dist.dtype}")
         # Butterworth low-pass filter in frequency domain
+        # Slice-wise H computation eliminates 3D meshgrid memory balloon
         if lowpass_cutoff > 0:
             _t0 = time.time()
             LOGGER.info(f"\tFFT low-pass filter (cutoff={lowpass_cutoff})...")
             from scipy.fft import rfftn, irfftn, fftfreq, rfftfreq
             rx, ry, rz = dist.shape
-            fx = fftfreq(rx)
-            fy = fftfreq(ry)
-            fz = rfftfreq(rz)  # half-spectrum for real FFT
-            FX, FY, FZ = np.meshgrid(fx, fy, fz, indexing='ij')
-            freq_mag = np.sqrt(FX**2 + FY**2 + FZ**2)
-            # Butterworth order-4: sharper transition than ord-2, better
-            # staircase suppression without Gibbs ringing artifacts
-            H = (1.0 / (1.0 + (freq_mag / lowpass_cutoff)**8)).astype(np.float32)
-            del FX, FY, FZ, freq_mag
-            D_fft = rfftn(dist)
+            fx = fftfreq(rx).astype(np.float32)
+            fy = fftfreq(ry).astype(np.float32)
+            fz_sq = (rfftfreq(rz).astype(np.float32))**2
+            D_fft = rfftn(dist.astype(np.float32))
             del dist
-            D_fft *= H
-            del H
+            cutoff_inv8 = np.float32(1.0 / lowpass_cutoff**8)
+            for i in range(rx):
+                fx_sq = fx[i]**2
+                # 2D slice: shape (ry, rz//2+1), ~0.5 MB per slice
+                fxy_sq = fx_sq + fy**2
+                freq_mag_sq = fxy_sq[:, None] + fz_sq[None, :]
+                freq_mag_4 = freq_mag_sq * freq_mag_sq
+                H_slice = (1.0 / (1.0 + freq_mag_4 * freq_mag_4
+                                  * cutoff_inv8)).astype(np.float32)
+                D_fft[i, :, :] *= H_slice
+            del H_slice, fxy_sq, freq_mag_sq, freq_mag_4
             dist = irfftn(D_fft, s=(rx, ry, rz))
             del D_fft
             LOGGER.info(f"\t...filtering completed in {time.time()-_t0:.1f} s")

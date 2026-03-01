@@ -17,6 +17,7 @@ import os
 import numpy as np
 cimport numpy as np
 from libc.math cimport cos, sin, fabs, sqrt, pow as cpow
+from libc.string cimport memset
 from cython.parallel cimport prange
 
 np.import_array()
@@ -860,3 +861,244 @@ def resample_and_pack(
                         set_bit(out, lin_idx)
 
     return packed
+
+
+# ---------------------------------------------------------------------------
+# Chessboard CDT -> int8 SDF (reads packed bits, eliminates memory balloon)
+# ---------------------------------------------------------------------------
+
+cdef inline int _read_packed_bit(
+    const unsigned char *packed, long long lin_idx,
+) noexcept nogil:
+    """Read a single bit from MSB-first packed array."""
+    return (packed[lin_idx >> 3] >> (7 - <int>(lin_idx & 7))) & 1
+
+
+cdef void _cdt_init(
+    signed char *dist,
+    const unsigned char *packed,
+    long long rx, long long ry, long long rz,
+    int stride, int px, int py, int pz,
+    int exterior,
+    int n_threads,
+) noexcept nogil:
+    """Initialize CDT distance array from packed bits.
+
+    Interior (exterior=0): empty->127 (background), occupied->0 (seed)
+    Exterior (exterior=1): empty->0 (seed), occupied->127 (background)
+    """
+    cdef long long total = <long long>px * <long long>py * <long long>pz
+    cdef signed char fg_val
+    cdef int si, sj, sk, pi, pj, pk
+    cdef long long full_lin
+    cdef int sx = <int>((rx + stride - 1) // stride)
+    cdef int sy = <int>((ry + stride - 1) // stride)
+    cdef int sz = <int>((rz + stride - 1) // stride)
+    cdef long long full_slice = rx * ry
+    cdef int pad_slice = px * py
+
+    # Interior (exterior=0): CDT(V) = distance to nearest empty voxel.
+    #   Occupied voxels -> 127 (to be computed), empty voxels -> 0 (seeds).
+    #   Default fill = 0 (empty/padding). Set occupied bits to 127.
+    # Exterior (exterior=1): CDT(~V) = distance to nearest occupied voxel.
+    #   Empty voxels -> 127 (to be computed), occupied voxels -> 0 (seeds).
+    #   Default fill = 127 (empty/padding are far). Set occupied bits to 0.
+    if exterior:
+        memset(dist, 127, <size_t>total)
+        fg_val = 0
+    else:
+        memset(dist, 0, <size_t>total)
+        fg_val = 127
+
+    for sk in prange(sz, num_threads=n_threads, schedule='static'):
+        pk = sk + 2
+        for sj in range(sy):
+            pj = sj + 2
+            for si in range(sx):
+                pi = si + 2
+                full_lin = (<long long>(si * stride) +
+                            <long long>(sj * stride) * rx +
+                            <long long>(sk * stride) * full_slice)
+                if _read_packed_bit(packed, full_lin):
+                    dist[pi + pj * px + pk * pad_slice] = fg_val
+
+
+cdef void _cdt_forward(signed char *d, int px, int py, int pz) noexcept nogil:
+    """Forward raster scan: 13 forward-cone neighbors, chessboard cost=1."""
+    cdef int i, j, k, idx, v, nv
+    cdef int sxy = px * py
+    cdef int base_k, base_km1
+    cdef int base_jk, base_jm1_k, base_jm1_km1, base_j_km1, base_jp1_km1
+
+    for k in range(1, pz - 1):
+        base_k = k * sxy
+        base_km1 = (k - 1) * sxy
+        for j in range(1, py - 1):
+            base_jk = j * px + base_k
+            base_jm1_k = (j - 1) * px + base_k
+            base_jm1_km1 = (j - 1) * px + base_km1
+            base_j_km1 = j * px + base_km1
+            base_jp1_km1 = (j + 1) * px + base_km1
+            for i in range(1, px - 1):
+                idx = i + base_jk
+                v = d[idx]
+                if v == 0:
+                    continue
+                # k-1 plane (9 neighbors)
+                nv = d[i - 1 + base_jm1_km1] + 1
+                if nv < v: v = nv
+                nv = d[i + base_jm1_km1] + 1
+                if nv < v: v = nv
+                nv = d[i + 1 + base_jm1_km1] + 1
+                if nv < v: v = nv
+                nv = d[i - 1 + base_j_km1] + 1
+                if nv < v: v = nv
+                nv = d[i + base_j_km1] + 1
+                if nv < v: v = nv
+                nv = d[i + 1 + base_j_km1] + 1
+                if nv < v: v = nv
+                nv = d[i - 1 + base_jp1_km1] + 1
+                if nv < v: v = nv
+                nv = d[i + base_jp1_km1] + 1
+                if nv < v: v = nv
+                nv = d[i + 1 + base_jp1_km1] + 1
+                if nv < v: v = nv
+                # same k, j-1 row (3 neighbors)
+                nv = d[i - 1 + base_jm1_k] + 1
+                if nv < v: v = nv
+                nv = d[i + base_jm1_k] + 1
+                if nv < v: v = nv
+                nv = d[i + 1 + base_jm1_k] + 1
+                if nv < v: v = nv
+                # same k, same j, i-1
+                nv = d[idx - 1] + 1
+                if nv < v: v = nv
+                d[idx] = <signed char>v
+
+
+cdef void _cdt_backward(signed char *d, int px, int py, int pz) noexcept nogil:
+    """Backward raster scan: 13 backward-cone neighbors, chessboard cost=1."""
+    cdef int i, j, k, idx, v, nv
+    cdef int sxy = px * py
+    cdef int base_k, base_kp1
+    cdef int base_jk, base_jp1_k, base_jm1_kp1, base_j_kp1, base_jp1_kp1
+
+    for k in range(pz - 2, 0, -1):
+        base_k = k * sxy
+        base_kp1 = (k + 1) * sxy
+        for j in range(py - 2, 0, -1):
+            base_jk = j * px + base_k
+            base_jp1_k = (j + 1) * px + base_k
+            base_jm1_kp1 = (j - 1) * px + base_kp1
+            base_j_kp1 = j * px + base_kp1
+            base_jp1_kp1 = (j + 1) * px + base_kp1
+            for i in range(px - 2, 0, -1):
+                idx = i + base_jk
+                v = d[idx]
+                if v == 0:
+                    continue
+                # k+1 plane (9 neighbors)
+                nv = d[i - 1 + base_jm1_kp1] + 1
+                if nv < v: v = nv
+                nv = d[i + base_jm1_kp1] + 1
+                if nv < v: v = nv
+                nv = d[i + 1 + base_jm1_kp1] + 1
+                if nv < v: v = nv
+                nv = d[i - 1 + base_j_kp1] + 1
+                if nv < v: v = nv
+                nv = d[i + base_j_kp1] + 1
+                if nv < v: v = nv
+                nv = d[i + 1 + base_j_kp1] + 1
+                if nv < v: v = nv
+                nv = d[i - 1 + base_jp1_kp1] + 1
+                if nv < v: v = nv
+                nv = d[i + base_jp1_kp1] + 1
+                if nv < v: v = nv
+                nv = d[i + 1 + base_jp1_kp1] + 1
+                if nv < v: v = nv
+                # same k, j+1 row (3 neighbors)
+                nv = d[i - 1 + base_jp1_k] + 1
+                if nv < v: v = nv
+                nv = d[i + base_jp1_k] + 1
+                if nv < v: v = nv
+                nv = d[i + 1 + base_jp1_k] + 1
+                if nv < v: v = nv
+                # same k, same j, i+1
+                nv = d[idx + 1] + 1
+                if nv < v: v = nv
+                d[idx] = <signed char>v
+
+
+def compute_sdf_cdt(
+    const unsigned char[::1] packed,
+    long long rx, long long ry, long long rz,
+    int stride,
+    int n_threads=0,
+):
+    """Compute int8 SDF from packed binary voxels using chessboard CDT.
+
+    Reads packed F-order bits directly, applies stride, pads by 1 voxel,
+    computes interior and exterior chessboard distance transforms (2-pass
+    raster scan each), returns SDF = interior - exterior as int8.
+
+    Distances clamped to 127 (int8 max). Only the zero-crossing matters
+    for marching cubes; Butterworth impulse response is 99% within radius 3.
+
+    Args:
+        packed: F-order packed binary volume
+        rx, ry, rz: full-resolution grid dimensions
+        stride: subsample factor (1 = no stride)
+        n_threads: OpenMP threads (0 = auto-detect)
+
+    Returns:
+        np.ndarray[int8]: SDF array, F-order shape (px, py, pz) where
+        px = ceil(rx/stride)+2, etc. +2 is 1-voxel padding per side.
+        Positive inside, negative outside.
+    """
+    cdef int sx = <int>((rx + stride - 1) // stride)
+    cdef int sy = <int>((ry + stride - 1) // stride)
+    cdef int sz = <int>((rz + stride - 1) // stride)
+    # Pad by 2: outer layer is sacrificial (never scanned), inner layer
+    # ensures CDT propagation reaches all data voxels. Data starts at
+    # index 2, CDT scans [1, dim-2]. Zero-crossing guaranteed inside.
+    cdef int px = sx + 4
+    cdef int py = sy + 4
+    cdef int pz = sz + 4
+    cdef long long total = <long long>px * <long long>py * <long long>pz
+    cdef int pad_slice = px * py
+
+    if n_threads <= 0:
+        n_threads = _get_optimal_threads(pz)
+
+    interior_arr = np.empty(total, dtype=np.int8)
+    exterior_arr = np.empty(total, dtype=np.int8)
+    cdef signed char[::1] interior_view = interior_arr
+    cdef signed char[::1] exterior_view = exterior_arr
+    cdef signed char *interior = &interior_view[0]
+    cdef signed char *exterior = &exterior_view[0]
+    cdef const unsigned char *src = &packed[0]
+    cdef long long idx
+    cdef int k
+
+    with nogil:
+        # Interior CDT: occupied->0 (seed), empty->127
+        _cdt_init(interior, src, rx, ry, rz, stride, px, py, pz, 0, n_threads)
+        _cdt_forward(interior, px, py, pz)
+        _cdt_backward(interior, px, py, pz)
+
+        # Exterior CDT: empty->0 (seed), occupied->127
+        _cdt_init(exterior, src, rx, ry, rz, stride, px, py, pz, 1, n_threads)
+        _cdt_forward(exterior, px, py, pz)
+        _cdt_backward(exterior, px, py, pz)
+
+        # SDF = interior - exterior (in-place into interior)
+        for k in prange(pz, num_threads=n_threads, schedule='static'):
+            for idx in range(<long long>(k * pad_slice),
+                             <long long>((k + 1) * pad_slice)):
+                interior[idx] = <signed char>(
+                    <int>interior[idx] - <int>exterior[idx])
+
+    del exterior_arr
+    # Strip sacrificial outer padding, keep inner 1-voxel pad for MC
+    sdf_3d = interior_arr.reshape((px, py, pz), order='F')
+    return sdf_3d[1:-1, 1:-1, 1:-1].copy()
