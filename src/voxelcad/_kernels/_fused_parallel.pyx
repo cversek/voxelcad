@@ -1182,3 +1182,283 @@ def convolve_sdf_spatial(
                     out[i, j, k] = <signed char>val
 
     return out_arr
+
+
+# ---------------------------------------------------------------------------
+# Fused streaming: convolution + marching cubes in one Z-sweep
+# ---------------------------------------------------------------------------
+
+# Edge endpoint vertex indices (v0, v1) for each of 12 MC edges
+cdef int _EDGE_V0[12]
+cdef int _EDGE_V1[12]
+# Edge 0: v0-v1, 1: v1-v2, 2: v2-v3, 3: v3-v0
+# Edge 4: v4-v5, 5: v5-v6, 6: v6-v7, 7: v7-v4
+# Edge 8: v0-v4, 9: v1-v5, 10: v2-v6, 11: v3-v7
+_EDGE_V0[0]=0; _EDGE_V1[0]=1;  _EDGE_V0[1]=1; _EDGE_V1[1]=2
+_EDGE_V0[2]=2; _EDGE_V1[2]=3;  _EDGE_V0[3]=3; _EDGE_V1[3]=0
+_EDGE_V0[4]=4; _EDGE_V1[4]=5;  _EDGE_V0[5]=5; _EDGE_V1[5]=6
+_EDGE_V0[6]=6; _EDGE_V1[6]=7;  _EDGE_V0[7]=7; _EDGE_V1[7]=4
+_EDGE_V0[8]=0; _EDGE_V1[8]=4;  _EDGE_V0[9]=1; _EDGE_V1[9]=5
+_EDGE_V0[10]=2; _EDGE_V1[10]=6; _EDGE_V0[11]=3; _EDGE_V1[11]=7
+
+# Vertex offsets (di, dj, dk) for each of the 8 cube vertices
+cdef int _VTX_DI[8]
+cdef int _VTX_DJ[8]
+cdef int _VTX_DK[8]
+# v0=(0,0,0) v1=(1,0,0) v2=(1,1,0) v3=(0,1,0)
+# v4=(0,0,1) v5=(1,0,1) v6=(1,1,1) v7=(0,1,1)
+_VTX_DI[0]=0; _VTX_DJ[0]=0; _VTX_DK[0]=0
+_VTX_DI[1]=1; _VTX_DJ[1]=0; _VTX_DK[1]=0
+_VTX_DI[2]=1; _VTX_DJ[2]=1; _VTX_DK[2]=0
+_VTX_DI[3]=0; _VTX_DJ[3]=1; _VTX_DK[3]=0
+_VTX_DI[4]=0; _VTX_DJ[4]=0; _VTX_DK[4]=1
+_VTX_DI[5]=1; _VTX_DJ[5]=0; _VTX_DK[5]=1
+_VTX_DI[6]=1; _VTX_DJ[6]=1; _VTX_DK[6]=1
+_VTX_DI[7]=0; _VTX_DJ[7]=1; _VTX_DK[7]=1
+
+
+def streaming_mc_mesh(
+    const signed char[:, :, ::1] sdf,
+    float vsx, float vsy, float vsz,
+    float ox=0.0, float oy=0.0, float oz=0.0,
+    float isovalue=0.0,
+):
+    """Streaming marching cubes on int8 SDF — returns vertices and faces.
+
+    Processes the SDF volume one Z-slice pair at a time. No VTK or PyVista
+    dependency. Returns numpy arrays suitable for constructing a PolyData mesh.
+
+    Args:
+        sdf: int8 SDF array, C-contiguous, shape (nx, ny, nz)
+        vsx, vsy, vsz: voxel spacing per axis
+        ox, oy, oz: origin offset
+        isovalue: isosurface level (typically 0.0)
+
+    Returns:
+        tuple (vertices, faces):
+            vertices: float32 array (N, 3)
+            faces: int32 array (M, 3) — triangle vertex indices
+    """
+    from voxelcad._kernels._mc_tables import EDGE_TABLE, TRI_TABLE
+
+    cdef int nx = sdf.shape[0]
+    cdef int ny = sdf.shape[1]
+    cdef int nz = sdf.shape[2]
+
+    # Edge and triangle tables
+    cdef unsigned short[::1] edge_tbl = EDGE_TABLE
+    cdef signed char[:, ::1] tri_tbl = TRI_TABLE
+
+    # Pre-allocate output (conservative: ~4 tris per surface cell)
+    cdef int est_tris = 4 * (nx * ny + ny * nz + nx * nz)
+    verts_list = np.empty((est_tris * 3, 3), dtype=np.float32)
+    faces_list = np.empty((est_tris, 3), dtype=np.int32)
+    cdef float[:, ::1] verts = verts_list
+    cdef int[:, ::1] faces = faces_list
+    cdef int n_verts = 0
+    cdef int n_faces = 0
+
+    cdef int i, j, k, e, t_idx
+    cdef int cube_idx
+    cdef unsigned short edges
+    cdef float vals[8]
+    cdef float vert_coords[12][3]
+    cdef float v0_val, v1_val, t_interp
+    cdef int v0_idx, v1_idx
+    cdef int tri_edge[3]
+
+    for k in range(nz - 1):
+        for j in range(ny - 1):
+            for i in range(nx - 1):
+                # Read 8 corner values
+                vals[0] = <float>sdf[i, j, k]
+                vals[1] = <float>sdf[i+1, j, k]
+                vals[2] = <float>sdf[i+1, j+1, k]
+                vals[3] = <float>sdf[i, j+1, k]
+                vals[4] = <float>sdf[i, j, k+1]
+                vals[5] = <float>sdf[i+1, j, k+1]
+                vals[6] = <float>sdf[i+1, j+1, k+1]
+                vals[7] = <float>sdf[i, j+1, k+1]
+
+                # Compute cube index
+                cube_idx = 0
+                if vals[0] < isovalue: cube_idx |= 1
+                if vals[1] < isovalue: cube_idx |= 2
+                if vals[2] < isovalue: cube_idx |= 4
+                if vals[3] < isovalue: cube_idx |= 8
+                if vals[4] < isovalue: cube_idx |= 16
+                if vals[5] < isovalue: cube_idx |= 32
+                if vals[6] < isovalue: cube_idx |= 64
+                if vals[7] < isovalue: cube_idx |= 128
+
+                edges = edge_tbl[cube_idx]
+                if edges == 0:
+                    continue
+
+                # Interpolate vertices on intersected edges
+                for e in range(12):
+                    if not (edges & (1 << e)):
+                        continue
+                    v0_idx = _EDGE_V0[e]
+                    v1_idx = _EDGE_V1[e]
+                    v0_val = vals[v0_idx]
+                    v1_val = vals[v1_idx]
+                    if v0_val == v1_val:
+                        t_interp = 0.5
+                    else:
+                        t_interp = (isovalue - v0_val) / (v1_val - v0_val)
+                    vert_coords[e][0] = ox + vsx * (
+                        <float>(i + _VTX_DI[v0_idx]) +
+                        t_interp * <float>(_VTX_DI[v1_idx] - _VTX_DI[v0_idx]))
+                    vert_coords[e][1] = oy + vsy * (
+                        <float>(j + _VTX_DJ[v0_idx]) +
+                        t_interp * <float>(_VTX_DJ[v1_idx] - _VTX_DJ[v0_idx]))
+                    vert_coords[e][2] = oz + vsz * (
+                        <float>(k + _VTX_DK[v0_idx]) +
+                        t_interp * <float>(_VTX_DK[v1_idx] - _VTX_DK[v0_idx]))
+
+                # Emit triangles
+                t_idx = 0
+                while tri_tbl[cube_idx, t_idx] != -1:
+                    # Grow arrays if needed
+                    if n_verts + 3 > verts_list.shape[0]:
+                        new_size = verts_list.shape[0] * 2
+                        verts_list.resize((new_size, 3), refcheck=False)
+                        verts = verts_list
+                    if n_faces + 1 > faces_list.shape[0]:
+                        new_size = faces_list.shape[0] * 2
+                        faces_list.resize((new_size, 3), refcheck=False)
+                        faces = faces_list
+
+                    for e in range(3):
+                        tri_edge[e] = tri_tbl[cube_idx, t_idx + e]
+                        verts[n_verts + e, 0] = vert_coords[tri_edge[e]][0]
+                        verts[n_verts + e, 1] = vert_coords[tri_edge[e]][1]
+                        verts[n_verts + e, 2] = vert_coords[tri_edge[e]][2]
+
+                    faces[n_faces, 0] = n_verts
+                    faces[n_faces, 1] = n_verts + 1
+                    faces[n_faces, 2] = n_verts + 2
+                    n_verts += 3
+                    n_faces += 1
+                    t_idx += 3
+
+    return verts_list[:n_verts].copy(), faces_list[:n_faces].copy()
+
+
+def streaming_mc_stl(
+    const signed char[:, :, ::1] sdf,
+    float vsx, float vsy, float vsz,
+    str filename,
+    float ox=0.0, float oy=0.0, float oz=0.0,
+    float isovalue=0.0,
+):
+    """Streaming marching cubes — writes binary STL directly to disk.
+
+    Processes the SDF volume one cell at a time. Triangles are written
+    immediately to the output file. The full mesh never exists in memory.
+
+    Binary STL format: 80-byte header, 4-byte triangle count,
+    then 50 bytes per triangle (normal + 3 vertices + attribute).
+
+    Args:
+        sdf: int8 SDF array, C-contiguous, shape (nx, ny, nz)
+        vsx, vsy, vsz: voxel spacing per axis
+        filename: output STL file path
+        ox, oy, oz: origin offset
+        isovalue: isosurface level (typically 0.0)
+
+    Returns:
+        int: number of triangles written
+    """
+    import struct
+    from voxelcad._kernels._mc_tables import EDGE_TABLE, TRI_TABLE
+
+    cdef int nx = sdf.shape[0]
+    cdef int ny = sdf.shape[1]
+    cdef int nz = sdf.shape[2]
+
+    cdef unsigned short[::1] edge_tbl = EDGE_TABLE
+    cdef signed char[:, ::1] tri_tbl = TRI_TABLE
+
+    cdef int i, j, k, e, t_idx
+    cdef int cube_idx
+    cdef unsigned short edges
+    cdef float vals[8]
+    cdef float vert_coords[12][3]
+    cdef float v0_val, v1_val, t_interp
+    cdef int v0_idx, v1_idx
+    cdef int tri_count = 0
+
+    f = open(filename, 'wb')
+    # Header (80 bytes) + placeholder triangle count (4 bytes)
+    f.write(b'\x00' * 80)
+    f.write(struct.pack('<I', 0))
+
+    for k in range(nz - 1):
+        for j in range(ny - 1):
+            for i in range(nx - 1):
+                vals[0] = <float>sdf[i, j, k]
+                vals[1] = <float>sdf[i+1, j, k]
+                vals[2] = <float>sdf[i+1, j+1, k]
+                vals[3] = <float>sdf[i, j+1, k]
+                vals[4] = <float>sdf[i, j, k+1]
+                vals[5] = <float>sdf[i+1, j, k+1]
+                vals[6] = <float>sdf[i+1, j+1, k+1]
+                vals[7] = <float>sdf[i, j+1, k+1]
+
+                cube_idx = 0
+                if vals[0] < isovalue: cube_idx |= 1
+                if vals[1] < isovalue: cube_idx |= 2
+                if vals[2] < isovalue: cube_idx |= 4
+                if vals[3] < isovalue: cube_idx |= 8
+                if vals[4] < isovalue: cube_idx |= 16
+                if vals[5] < isovalue: cube_idx |= 32
+                if vals[6] < isovalue: cube_idx |= 64
+                if vals[7] < isovalue: cube_idx |= 128
+
+                edges = edge_tbl[cube_idx]
+                if edges == 0:
+                    continue
+
+                for e in range(12):
+                    if not (edges & (1 << e)):
+                        continue
+                    v0_idx = _EDGE_V0[e]
+                    v1_idx = _EDGE_V1[e]
+                    v0_val = vals[v0_idx]
+                    v1_val = vals[v1_idx]
+                    if v0_val == v1_val:
+                        t_interp = 0.5
+                    else:
+                        t_interp = (isovalue - v0_val) / (v1_val - v0_val)
+                    vert_coords[e][0] = ox + vsx * (
+                        <float>(i + _VTX_DI[v0_idx]) +
+                        t_interp * <float>(_VTX_DI[v1_idx] - _VTX_DI[v0_idx]))
+                    vert_coords[e][1] = oy + vsy * (
+                        <float>(j + _VTX_DJ[v0_idx]) +
+                        t_interp * <float>(_VTX_DJ[v1_idx] - _VTX_DJ[v0_idx]))
+                    vert_coords[e][2] = oz + vsz * (
+                        <float>(k + _VTX_DK[v0_idx]) +
+                        t_interp * <float>(_VTX_DK[v1_idx] - _VTX_DK[v0_idx]))
+
+                t_idx = 0
+                while tri_tbl[cube_idx, t_idx] != -1:
+                    # Normal = (0,0,0) placeholder — slicer computes from verts
+                    f.write(struct.pack('<fff', 0.0, 0.0, 0.0))
+                    for e in range(3):
+                        edge_idx = tri_tbl[cube_idx, t_idx + e]
+                        f.write(struct.pack('<fff',
+                            vert_coords[edge_idx][0],
+                            vert_coords[edge_idx][1],
+                            vert_coords[edge_idx][2]))
+                    f.write(struct.pack('<H', 0))  # attribute byte count
+                    tri_count += 1
+                    t_idx += 3
+
+    # Seek back and write triangle count
+    f.seek(80)
+    f.write(struct.pack('<I', tri_count))
+    f.close()
+
+    return tri_count

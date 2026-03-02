@@ -364,20 +364,49 @@ class VoxelModel:
                 del D_fft
                 LOGGER.info(f"\t...filtering completed in "
                             f"{time.time()-_t0:.1f} s")
-        # Build PyVista uniform grid from SDF (point data for contour)
-        rv = np.array(dist.shape)  # strided resolution
+        # Marching cubes: Cython streaming MC or VTK contour fallback
         vsv = self.grid.voxel_size_vector * mc_stride
-        ugrid = UniformGrid()
-        ugrid.dimensions = rv  # point grid matches SDF array shape
-        ugrid.spacing = vsv
-        ugrid.point_data['dist'] = dist.ravel(order='F')
-        del dist
-        # Marching cubes via contour on the signed distance field
         _t0 = time.time()
-        LOGGER.info(f"\textracting isosurface at isovalue={isovalue}...")
-        pv_surf = ugrid.contour([isovalue], scalars='dist')
-        del ugrid  # free grid
-        LOGGER.info(f"\t...contour completed in {time.time()-_t0:.1f} s")
+        from voxelcad._kernels import streaming_mc_mesh as _cython_mc
+        if _cython_mc is not None:
+            LOGGER.info(f"\tCython streaming MC (isovalue={isovalue})...")
+            dist_c = np.ascontiguousarray(dist)
+            del dist
+            verts, faces = _cython_mc(
+                dist_c, vsv[0], vsv[1], vsv[2],
+                isovalue=isovalue)
+            del dist_c
+            # Deduplicate vertices (streaming MC emits 3 per triangle).
+            # Quantize to grid resolution to merge float rounding diffs.
+            if verts.shape[0] > 0:
+                scale = 1e4 / max(vsv[0], vsv[1], vsv[2])
+                qv = np.round(verts * scale).astype(np.int32)
+                _, idx, inv = np.unique(
+                    qv.view(np.dtype((np.void, 12))),
+                    return_index=True, return_inverse=True)
+                verts = verts[idx]
+                faces = inv[faces.ravel()].reshape(-1, 3).astype(np.int32)
+            import pyvista as pv
+            if faces.shape[0] > 0:
+                pv_faces = np.column_stack([
+                    np.full(faces.shape[0], 3, dtype=np.int32),
+                    faces,
+                ])
+                pv_surf = pv.PolyData(verts, pv_faces)
+            else:
+                pv_surf = pv.PolyData()
+        else:
+            LOGGER.info(f"\tVTK contour (isovalue={isovalue})...")
+            rv = np.array(dist.shape)
+            ugrid = UniformGrid()
+            ugrid.dimensions = rv
+            ugrid.spacing = vsv
+            ugrid.point_data['dist'] = dist.ravel(order='F')
+            del dist
+            pv_surf = ugrid.contour([isovalue], scalars='dist')
+            del ugrid
+        LOGGER.info(f"\t...MC completed in {time.time()-_t0:.1f} s "
+                    f"({pv_surf.n_cells} tris)")
         if only_largest_component and pv_surf.n_points > 0:
             _t0 = time.time()
             LOGGER.info(f"\textracting largest component "
@@ -585,10 +614,37 @@ class VoxelModel:
                 target_reduction=target_reduction,
                 mc_stride=mc_stride,
             )
-            _t0 = time.time()
-            LOGGER.info(f"\tsaving STL ({surf_mesh.n_cells} tris)...")
-            surf_mesh.save(filename)
-            LOGGER.info(f"\t...save completed in {time.time()-_t0:.2f} s")
+            # Direct STL: use Cython streaming MC to write binary STL
+            # without holding full mesh in memory
+            from voxelcad._kernels import (
+                streaming_mc_stl as _stl_writer,
+                compute_sdf_cdt as _cdt,
+                convolve_sdf_spatial as _conv,
+            )
+            if (_stl_writer is not None and _cdt is not None
+                    and _conv is not None and self.voxel_data is not None):
+                _t0 = time.time()
+                LOGGER.info(f"\tstreaming STL export (no mesh in memory)...")
+                from voxelcad.utils.spectral import compute_butterworth_kernel
+                rx, ry, rz = self.grid.res_vector
+                sdf = _cdt(self.voxel_data, rx, ry, rz, mc_stride)
+                if mc_stride == 1:
+                    sdf = sdf[1:-1, 1:-1, 1:-1].copy()
+                if lowpass_cutoff > 0:
+                    kern = compute_butterworth_kernel(
+                        order=4, cutoff=lowpass_cutoff, radius=3)
+                    sdf = _conv(np.ascontiguousarray(sdf), kern['int8'])
+                vsv = self.grid.voxel_size_vector * mc_stride
+                n_tris = _stl_writer(
+                    np.ascontiguousarray(sdf), vsv[0], vsv[1], vsv[2],
+                    filename, isovalue=isovalue)
+                LOGGER.info(f"\t...streaming STL completed: {n_tris} tris "
+                            f"in {time.time()-_t0:.2f} s")
+            else:
+                _t0 = time.time()
+                LOGGER.info(f"\tsaving STL ({surf_mesh.n_cells} tris)...")
+                surf_mesh.save(filename)
+                LOGGER.info(f"\t...save completed in {time.time()-_t0:.2f} s")
         else:
             raise ValueError(f"The filetype of extension '{ext}' is not recognized!")
         LOGGER.info(f"END export, total time: {time.time()-t0:.1f} s")

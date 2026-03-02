@@ -23,6 +23,8 @@ evaluate_and_pack_hyperwiggly_gyroid = None
 resample_and_pack = None
 compute_sdf_cdt = None
 convolve_sdf_spatial = None
+streaming_mc_mesh = None
+streaming_mc_stl = None
 
 try:
     from ._fused_parallel import (
@@ -35,6 +37,8 @@ try:
         resample_and_pack,
         compute_sdf_cdt,
         convolve_sdf_spatial,
+        streaming_mc_mesh,
+        streaming_mc_stl,
         _detect_p_cores,
         _get_optimal_threads,
     )
@@ -53,4 +57,6 @@ __all__ = [
     'resample_and_pack',
     'compute_sdf_cdt',
     'convolve_sdf_spatial',
+    'streaming_mc_mesh',
+    'streaming_mc_stl',
 ]
