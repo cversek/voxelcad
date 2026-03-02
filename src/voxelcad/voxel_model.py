@@ -370,7 +370,7 @@ class VoxelModel:
         ugrid = UniformGrid()
         ugrid.dimensions = rv  # point grid matches SDF array shape
         ugrid.spacing = vsv
-        ugrid.point_data['dist'] = dist.ravel(order='F').astype(np.float32)
+        ugrid.point_data['dist'] = dist.ravel(order='F')
         del dist
         # Marching cubes via contour on the signed distance field
         _t0 = time.time()
