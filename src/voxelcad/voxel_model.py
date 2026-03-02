@@ -325,32 +325,45 @@ class VoxelModel:
             LOGGER.info(f"\t...scipy CDT completed in "
                         f"{time.time()-_t0:.1f} s, shape={dist.shape}, "
                         f"dtype={dist.dtype}")
-        # Butterworth low-pass filter in frequency domain
-        # Slice-wise H computation eliminates 3D meshgrid memory balloon
+        # Butterworth low-pass filter: Cython int8 spatial convolution
+        # (falls back to FFT if Cython unavailable)
         if lowpass_cutoff > 0:
             _t0 = time.time()
-            LOGGER.info(f"\tFFT low-pass filter (cutoff={lowpass_cutoff})...")
-            from scipy.fft import rfftn, irfftn, fftfreq, rfftfreq
-            rx, ry, rz = dist.shape
-            fx = fftfreq(rx).astype(np.float32)
-            fy = fftfreq(ry).astype(np.float32)
-            fz_sq = (rfftfreq(rz).astype(np.float32))**2
-            D_fft = rfftn(dist.astype(np.float32))
-            del dist
-            cutoff_inv8 = np.float32(1.0 / lowpass_cutoff**8)
-            for i in range(rx):
-                fx_sq = fx[i]**2
-                # 2D slice: shape (ry, rz//2+1), ~0.5 MB per slice
-                fxy_sq = fx_sq + fy**2
-                freq_mag_sq = fxy_sq[:, None] + fz_sq[None, :]
-                freq_mag_4 = freq_mag_sq * freq_mag_sq
-                H_slice = (1.0 / (1.0 + freq_mag_4 * freq_mag_4
-                                  * cutoff_inv8)).astype(np.float32)
-                D_fft[i, :, :] *= H_slice
-            del H_slice, fxy_sq, freq_mag_sq, freq_mag_4
-            dist = irfftn(D_fft, s=(rx, ry, rz))
-            del D_fft
-            LOGGER.info(f"\t...filtering completed in {time.time()-_t0:.1f} s")
+            from voxelcad._kernels import convolve_sdf_spatial as _cython_conv
+            if _cython_conv is not None:
+                from voxelcad.utils.spectral import compute_butterworth_kernel
+                LOGGER.info(f"\tCython int8 spatial convolution "
+                            f"(cutoff={lowpass_cutoff})...")
+                kern = compute_butterworth_kernel(
+                    order=4, cutoff=lowpass_cutoff, radius=3)
+                dist = _cython_conv(
+                    np.ascontiguousarray(dist), kern['int8'])
+                LOGGER.info(f"\t...filtering completed in "
+                            f"{time.time()-_t0:.1f} s")
+            else:
+                LOGGER.info(f"\tFFT low-pass filter "
+                            f"(cutoff={lowpass_cutoff})...")
+                from scipy.fft import rfftn, irfftn, fftfreq, rfftfreq
+                rx, ry, rz = dist.shape
+                fx = fftfreq(rx).astype(np.float32)
+                fy = fftfreq(ry).astype(np.float32)
+                fz_sq = (rfftfreq(rz).astype(np.float32))**2
+                D_fft = rfftn(dist.astype(np.float32))
+                del dist
+                cutoff_inv8 = np.float32(1.0 / lowpass_cutoff**8)
+                for i in range(rx):
+                    fx_sq = fx[i]**2
+                    fxy_sq = fx_sq + fy**2
+                    freq_mag_sq = fxy_sq[:, None] + fz_sq[None, :]
+                    freq_mag_4 = freq_mag_sq * freq_mag_sq
+                    H_slice = (1.0 / (1.0 + freq_mag_4 * freq_mag_4
+                                      * cutoff_inv8)).astype(np.float32)
+                    D_fft[i, :, :] *= H_slice
+                del H_slice, fxy_sq, freq_mag_sq, freq_mag_4
+                dist = irfftn(D_fft, s=(rx, ry, rz))
+                del D_fft
+                LOGGER.info(f"\t...filtering completed in "
+                            f"{time.time()-_t0:.1f} s")
         # Build PyVista uniform grid from SDF (point data for contour)
         rv = np.array(dist.shape)  # strided resolution
         vsv = self.grid.voxel_size_vector * mc_stride

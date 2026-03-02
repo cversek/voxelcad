@@ -16,6 +16,86 @@ from scipy.stats import binned_statistic
 LOGGER = logging.getLogger(__name__)
 
 
+def compute_butterworth_kernel(order=4, cutoff=0.25, radius=3):
+    """Compute a 3D Butterworth low-pass convolution kernel.
+
+    Creates the spatial impulse response of a Butterworth filter by
+    applying the frequency-domain transfer function to a delta impulse,
+    then extracting the central (2*radius+1)^3 region.
+
+    Parameters
+    ----------
+    order : int
+        Butterworth filter order (2, 4, 8, etc.).
+    cutoff : float
+        Cutoff frequency in cycles/voxel (0 < cutoff < 0.5).
+    radius : int
+        Half-width of the output kernel. The full kernel shape is
+        (2*radius+1)^3. Must be large enough to capture the impulse
+        response (radius=3 captures >99% energy for order<=4, cutoff>=0.2).
+
+    Returns
+    -------
+    dict with keys:
+        'float32' : np.ndarray, shape (2r+1, 2r+1, 2r+1), dtype float32
+            Normalized kernel (sums to ~1.0).
+        'int8' : np.ndarray, same shape, dtype int8
+            Quantized kernel: round(float32 * 256).clip(-128, 127).
+            For use with int8 SDF input and int16 accumulators.
+        'energy_captured' : float
+            Fraction of total impulse response energy within the kernel.
+    """
+    from scipy.fft import irfftn
+
+    # Use a volume large enough that the impulse response decays fully.
+    # 4*radius+1 gives 2*radius padding on each side of the kernel center.
+    n = 4 * radius + 1
+    delta = np.zeros((n, n, n), dtype=np.float32)
+    delta[n // 2, n // 2, n // 2] = 1.0
+
+    # FFT, apply Butterworth H, iFFT
+    D = rfftn(delta)
+    fx = fftfreq(n).astype(np.float32)
+    fy = fftfreq(n).astype(np.float32)
+    fz = rfftfreq(n).astype(np.float32)
+    # Build 3D frequency magnitude (small volume, meshgrid is fine)
+    FX, FY, FZ = np.meshgrid(fx, fy, fz, indexing='ij')
+    freq_mag = np.sqrt(FX**2 + FY**2 + FZ**2)
+    del FX, FY, FZ
+    exponent = 2 * order
+    H = (1.0 / (1.0 + (freq_mag / cutoff) ** exponent)).astype(np.float32)
+    D *= H
+    impulse_response = irfftn(D, s=(n, n, n)).astype(np.float32)
+    del D, H
+
+    # Extract central (2r+1)^3 kernel
+    c = n // 2
+    r = radius
+    kernel_f32 = impulse_response[c-r:c+r+1, c-r:c+r+1, c-r:c+r+1].copy()
+
+    # Energy captured = sum of extracted kernel / sum of full response
+    total_energy = float(np.sum(impulse_response ** 2))
+    kernel_energy = float(np.sum(kernel_f32 ** 2))
+    energy_captured = kernel_energy / total_energy if total_energy > 0 else 1.0
+
+    # Normalize so kernel sums to 1.0 (preserves DC level)
+    k_sum = kernel_f32.sum()
+    if k_sum > 0:
+        kernel_f32 /= k_sum
+
+    # Quantize to int8: scale by 256, round, clip
+    kernel_i8 = np.clip(
+        np.round(kernel_f32 * 256).astype(np.int16),
+        -128, 127
+    ).astype(np.int8)
+
+    return {
+        'float32': kernel_f32,
+        'int8': kernel_i8,
+        'energy_captured': energy_captured,
+    }
+
+
 def radial_power_spectrum(volume, n_bins=None):
     """Compute radially-averaged power spectrum of a 3D volume.
 

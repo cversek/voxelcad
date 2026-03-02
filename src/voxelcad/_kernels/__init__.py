@@ -22,6 +22,7 @@ evaluate_and_pack_wiggly_gyroid = None
 evaluate_and_pack_hyperwiggly_gyroid = None
 resample_and_pack = None
 compute_sdf_cdt = None
+convolve_sdf_spatial = None
 
 try:
     from ._fused_parallel import (
@@ -33,6 +34,7 @@ try:
         evaluate_and_pack_hyperwiggly_gyroid,
         resample_and_pack,
         compute_sdf_cdt,
+        convolve_sdf_spatial,
         _detect_p_cores,
         _get_optimal_threads,
     )
@@ -50,4 +52,5 @@ __all__ = [
     'evaluate_and_pack_hyperwiggly_gyroid',
     'resample_and_pack',
     'compute_sdf_cdt',
+    'convolve_sdf_spatial',
 ]

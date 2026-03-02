@@ -1102,3 +1102,83 @@ def compute_sdf_cdt(
     # Strip sacrificial outer padding, keep inner 1-voxel pad for MC
     sdf_3d = interior_arr.reshape((px, py, pz), order='F')
     return sdf_3d[1:-1, 1:-1, 1:-1].copy()
+
+
+# ---------------------------------------------------------------------------
+# Int8 spatial convolution (replaces FFT Butterworth for narrow kernels)
+# ---------------------------------------------------------------------------
+
+def convolve_sdf_spatial(
+    const signed char[:, :, ::1] sdf,
+    const signed char[:, :, ::1] kernel,
+    int n_threads=0,
+):
+    """Apply int8 spatial convolution to int8 SDF volume.
+
+    Replaces the FFT Butterworth pipeline for narrow kernels (radius <= 3).
+    int8 x int8 -> int16 accumulation, clipped back to int8. The zero-crossing
+    is scale-invariant: multiplying the kernel by 256 doesn't move where the
+    output crosses zero.
+
+    Memory: only input + output arrays. No FFT, no complex64, no float32
+    intermediates. At 504^3: 32 MB total vs 514 MB for FFT.
+
+    Args:
+        sdf: int8 SDF array, C-contiguous, shape (nx, ny, nz)
+        kernel: int8 quantized convolution kernel, shape (2r+1, 2r+1, 2r+1)
+            Typically from compute_butterworth_kernel()['int8']
+        n_threads: OpenMP threads (0 = auto-detect)
+
+    Returns:
+        np.ndarray[int8]: filtered SDF, same shape as input, C-contiguous
+    """
+    cdef int nx = sdf.shape[0]
+    cdef int ny = sdf.shape[1]
+    cdef int nz = sdf.shape[2]
+    cdef int kx = kernel.shape[0]
+    cdef int ky = kernel.shape[1]
+    cdef int kz = kernel.shape[2]
+    cdef int rx = kx // 2
+    cdef int ry = ky // 2
+    cdef int rz = kz // 2
+
+    out_arr = np.zeros((nx, ny, nz), dtype=np.int8)
+    cdef signed char[:, :, ::1] out = out_arr
+
+    cdef int i, j, k, di, dj, dk
+    cdef int si, sj, sk
+    cdef short acc
+    cdef int val
+
+    if n_threads <= 0:
+        n_threads = _get_optimal_threads(nx)
+
+    with nogil:
+        for i in prange(nx, num_threads=n_threads, schedule='static'):
+            for j in range(ny):
+                for k in range(nz):
+                    acc = 0
+                    for di in range(kx):
+                        si = i + di - rx
+                        if si < 0 or si >= nx:
+                            continue
+                        for dj in range(ky):
+                            sj = j + dj - ry
+                            if sj < 0 or sj >= ny:
+                                continue
+                            for dk in range(kz):
+                                sk = k + dk - rz
+                                if sk < 0 or sk >= nz:
+                                    continue
+                                acc = acc + <short>(
+                                    <short>sdf[si, sj, sk] *
+                                    <short>kernel[di, dj, dk])
+                    # Clip to int8 range
+                    val = <int>acc
+                    if val > 127:
+                        val = 127
+                    elif val < -128:
+                        val = -128
+                    out[i, j, k] = <signed char>val
+
+    return out_arr
