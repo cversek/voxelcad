@@ -651,41 +651,34 @@ class VoxelModel:
             cache = kwargs.pop('cache', True)
             target_reduction = kwargs.pop('target_reduction', 0.0)
             mc_stride = kwargs.pop('mc_stride', 2)
-            surf_mesh = self.render_surface_mesh(
-                isovalue=isovalue,
-                lowpass_cutoff=lowpass_cutoff,
-                cache=cache,
-                only_largest_component=only_largest,
-                target_reduction=target_reduction,
-                mc_stride=mc_stride,
-            )
-            # Direct STL: use Cython streaming MC to write binary STL
-            # without holding full mesh in memory
-            from voxelcad._kernels import (
-                streaming_mc_stl as _stl_writer,
-                compute_sdf_cdt as _cdt,
-                convolve_sdf_spatial as _conv,
-            )
-            if (_stl_writer is not None and _cdt is not None
-                    and _conv is not None and self.voxel_data is not None):
+            # Fully fused STL: packed bits -> STL file (no intermediates)
+            from voxelcad._kernels import fused_stl_export as _fused_stl
+            if _fused_stl is not None and self.voxel_data is not None:
                 _t0 = time.time()
-                LOGGER.info(f"\tstreaming STL export (no mesh in memory)...")
+                LOGGER.info(f"\tfused STL export (no intermediate volumes)...")
                 from voxelcad.utils.spectral import compute_butterworth_kernel
                 rx, ry, rz = self.grid.res_vector
-                sdf = _cdt(self.voxel_data, rx, ry, rz, mc_stride)
-                if mc_stride == 1:
-                    sdf = sdf[1:-1, 1:-1, 1:-1].copy()
-                if lowpass_cutoff > 0:
-                    kern = compute_butterworth_kernel(
-                        order=4, cutoff=lowpass_cutoff, radius=3)
-                    sdf = _conv(np.ascontiguousarray(sdf), kern['int8'])
-                vsv = self.grid.voxel_size_vector * mc_stride
-                n_tris = _stl_writer(
-                    np.ascontiguousarray(sdf), vsv[0], vsv[1], vsv[2],
-                    filename, isovalue=isovalue)
-                LOGGER.info(f"\t...streaming STL completed: {n_tris} tris "
+                kern = compute_butterworth_kernel(
+                    order=lowpass_order, cutoff=lowpass_cutoff, radius=3)
+                vsv = self.grid.voxel_size_vector
+                n_tris = _fused_stl(
+                    self.voxel_data, rx, ry, rz, kern['int8'],
+                    vsv[0], vsv[1], vsv[2], filename,
+                    stride=mc_stride, isovalue=isovalue)
+                LOGGER.info(f"\t...fused STL completed: {n_tris} tris "
                             f"in {time.time()-_t0:.2f} s")
             else:
+                LOGGER.warning(
+                    "fused_stl_export unavailable, falling back to "
+                    "render_surface_mesh + save")
+                surf_mesh = self.render_surface_mesh(
+                    isovalue=isovalue,
+                    lowpass_cutoff=lowpass_cutoff,
+                    cache=cache,
+                    only_largest_component=only_largest,
+                    target_reduction=target_reduction,
+                    mc_stride=mc_stride,
+                )
                 _t0 = time.time()
                 LOGGER.info(f"\tsaving STL ({surf_mesh.n_cells} tris)...")
                 surf_mesh.save(filename)

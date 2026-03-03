@@ -1804,3 +1804,330 @@ def sweep_mc_mesh(
         lay = layer_a_y_np
 
     return verts_np[:n_verts].copy(), faces_np[:n_faces].copy()
+
+
+def fused_stl_export(
+    const unsigned char[::1] packed,
+    long long rx, long long ry, long long rz,
+    const signed char[:, :, ::1] kernel,
+    float vsx, float vsy, float vsz,
+    str filename,
+    int stride=1,
+    float isovalue=0.0,
+    int n_threads=0,
+):
+    """Fully fused binary STL export: packed bits -> STL file on disk.
+
+    Fuses scale+convolve (Phase 1) + marching cubes + binary STL write
+    into a single streaming kernel. Only 2 Z-slices of convolved output
+    are held in memory at a time — no intermediate volumes, no mesh arrays.
+
+    The convolution is parallelized with OpenMP over the X-axis for each
+    Z-slice. MC cell processing and STL writes are sequential, streaming
+    triangles to disk via a buffered write.
+
+    Binary STL format: 80-byte header, 4-byte uint32 triangle count,
+    then 50 bytes per triangle (normal + 3 vertices + attribute).
+
+    References:
+        [1] Lorensen & Cline, "Marching Cubes: A High Resolution 3D
+            Surface Construction Algorithm", SIGGRAPH 1987.
+
+    Args:
+        packed: F-order packed binary volume (big-endian bitorder)
+        rx, ry, rz: full-resolution grid dimensions
+        kernel: int8 quantized Butterworth kernel, shape (2r+1, 2r+1, 2r+1)
+        vsx, vsy, vsz: voxel spacing per axis
+        filename: output STL file path
+        stride: subsample factor (1 = full resolution, 2 = half, etc.)
+        isovalue: isosurface level (typically 0.0)
+        n_threads: OpenMP threads (0 = auto-detect)
+
+    Returns:
+        int: number of triangles written
+    """
+    import struct
+    from voxelcad._kernels._mc_tables import EDGE_TABLE, TRI_TABLE
+
+    # Strided output dimensions (same as fused_scale_convolve)
+    cdef int sx = <int>((rx + stride - 1) // stride)
+    cdef int sy = <int>((ry + stride - 1) // stride)
+    cdef int sz = <int>((rz + stride - 1) // stride)
+    cdef int px = sx + 2  # padded
+    cdef int py = sy + 2
+    cdef int pz = sz + 2
+
+    cdef int kx = kernel.shape[0]
+    cdef int ky = kernel.shape[1]
+    cdef int kz_dim = kernel.shape[2]
+    cdef int krx = kx // 2
+    cdef int kry = ky // 2
+    cdef int krz = kz_dim // 2
+
+    # MC voxel spacing and origin offset:
+    # stride=1: Phase 1+2 pipeline strips padding → offset by -1 voxel
+    # stride>1: Phase 1+2 pipeline keeps padding → origin at (0,0,0)
+    cdef float mc_vsx, mc_vsy, mc_vsz
+    cdef float mc_ox, mc_oy, mc_oz
+    if stride == 1:
+        mc_vsx = vsx
+        mc_vsy = vsy
+        mc_vsz = vsz
+        mc_ox = -vsx
+        mc_oy = -vsy
+        mc_oz = -vsz
+    else:
+        mc_vsx = vsx * <float>stride
+        mc_vsy = vsy * <float>stride
+        mc_vsz = vsz * <float>stride
+        mc_ox = 0.0
+        mc_oy = 0.0
+        mc_oz = 0.0
+
+    cdef unsigned short[::1] edge_tbl = EDGE_TABLE
+    cdef signed char[:, ::1] tri_tbl = TRI_TABLE
+
+    # Two Z-slices of convolved output (int8)
+    slice_a_np = np.full((px, py), -1, dtype=np.int8)
+    slice_b_np = np.full((px, py), -1, dtype=np.int8)
+    cdef signed char[:, ::1] slice_a = slice_a_np
+    cdef signed char[:, ::1] slice_b = slice_b_np
+
+    # Source packed bits
+    cdef const unsigned char *src_ptr = &packed[0]
+    cdef long long rx_ll = rx
+    cdef long long rxy = rx * ry
+    cdef int str_val = stride
+
+    # Convolution variables
+    cdef int pi, pj, di, dj, dk
+    cdef int s_i, s_j, s_k, f_i, f_j, f_k
+    cdef short acc
+    cdef int conv_val
+    cdef long long bit_idx
+    cdef signed char src_val
+    cdef int conv_k
+
+    # MC variables
+    cdef int i, j, e, t_idx, k
+    cdef int cube_idx
+    cdef unsigned short edges_mask
+    cdef float corner_vals[8]
+    cdef float vert_coords[12][3]
+    cdef float v0_val, v1_val, t_interp
+    cdef int v0_idx, v1_idx
+    cdef int tri_count = 0
+
+    # STL write buffer (4096 triangles * 50 bytes = 200 KB)
+    cdef int BUF_MAX = 4096
+    stl_buf_np = np.zeros(BUF_MAX * 50, dtype=np.uint8)
+    cdef unsigned char[::1] stl_buf_view = stl_buf_np
+    cdef unsigned char *stl_buf = &stl_buf_view[0]
+    cdef float *fp
+    cdef unsigned short *up
+    cdef int buf_count = 0
+    cdef int buf_off
+    cdef int ei0, ei1, ei2
+
+    if n_threads <= 0:
+        n_threads = _get_optimal_threads(px)
+
+    # Open file, write STL header + placeholder count
+    f = open(filename, 'wb')
+    f.write(b'\x00' * 80)
+    f.write(struct.pack('<I', 0))
+
+    # --- Compute initial slice_b (z=1) ---
+    # slice_a (z=0) is already all -1 (padding)
+    conv_k = 0  # strided Z for pk=1
+    with nogil:
+        for pi in prange(px, num_threads=n_threads, schedule='static'):
+            for pj in range(py):
+                if pi == 0 or pi == px - 1 or pj == 0 or pj == py - 1:
+                    slice_b[pi, pj] = -1
+                else:
+                    acc = 0
+                    for di in range(kx):
+                        s_i = (pi - 1) + di - krx
+                        for dj in range(ky):
+                            s_j = (pj - 1) + dj - kry
+                            for dk in range(kz_dim):
+                                s_k = conv_k + dk - krz
+                                f_i = s_i * str_val
+                                f_j = s_j * str_val
+                                f_k = s_k * str_val
+                                if (f_i < 0 or f_i >= <int>rx or
+                                        f_j < 0 or f_j >= <int>ry or
+                                        f_k < 0 or f_k >= <int>rz):
+                                    src_val = -1
+                                else:
+                                    bit_idx = (
+                                        <long long>f_i +
+                                        <long long>f_j * rx_ll +
+                                        <long long>f_k * rxy)
+                                    if (src_ptr[bit_idx >> 3] >>
+                                            (7 - <int>(bit_idx & 7))) & 1:
+                                        src_val = 1
+                                    else:
+                                        src_val = -1
+                                acc = acc + <short>(
+                                    <short>src_val *
+                                    <short>kernel[di, dj, dk])
+                    conv_val = <int>acc
+                    if conv_val > 127:
+                        conv_val = 127
+                    elif conv_val < -128:
+                        conv_val = -128
+                    slice_b[pi, pj] = <signed char>conv_val
+
+    # --- Main Z-sweep: MC on slice pairs + STL write ---
+    for k in range(pz - 1):
+        # MC on slice_a(z=k), slice_b(z=k+1)
+        for j in range(py - 1):
+            for i in range(px - 1):
+                corner_vals[0] = <float>slice_a[i, j]
+                corner_vals[1] = <float>slice_a[i + 1, j]
+                corner_vals[2] = <float>slice_a[i + 1, j + 1]
+                corner_vals[3] = <float>slice_a[i, j + 1]
+                corner_vals[4] = <float>slice_b[i, j]
+                corner_vals[5] = <float>slice_b[i + 1, j]
+                corner_vals[6] = <float>slice_b[i + 1, j + 1]
+                corner_vals[7] = <float>slice_b[i, j + 1]
+
+                cube_idx = 0
+                if corner_vals[0] < isovalue: cube_idx |= 1
+                if corner_vals[1] < isovalue: cube_idx |= 2
+                if corner_vals[2] < isovalue: cube_idx |= 4
+                if corner_vals[3] < isovalue: cube_idx |= 8
+                if corner_vals[4] < isovalue: cube_idx |= 16
+                if corner_vals[5] < isovalue: cube_idx |= 32
+                if corner_vals[6] < isovalue: cube_idx |= 64
+                if corner_vals[7] < isovalue: cube_idx |= 128
+
+                edges_mask = edge_tbl[cube_idx]
+                if edges_mask == 0:
+                    continue
+
+                # Interpolate vertices on active edges
+                for e in range(12):
+                    if not (edges_mask & (1 << e)):
+                        continue
+                    v0_idx = _EDGE_V0[e]
+                    v1_idx = _EDGE_V1[e]
+                    v0_val = corner_vals[v0_idx]
+                    v1_val = corner_vals[v1_idx]
+                    if v0_val == v1_val:
+                        t_interp = 0.5
+                    else:
+                        t_interp = (isovalue - v0_val) / (v1_val - v0_val)
+                    vert_coords[e][0] = mc_ox + mc_vsx * (
+                        <float>(i + _VTX_DI[v0_idx]) +
+                        t_interp * <float>(_VTX_DI[v1_idx] - _VTX_DI[v0_idx]))
+                    vert_coords[e][1] = mc_oy + mc_vsy * (
+                        <float>(j + _VTX_DJ[v0_idx]) +
+                        t_interp * <float>(_VTX_DJ[v1_idx] - _VTX_DJ[v0_idx]))
+                    vert_coords[e][2] = mc_oz + mc_vsz * (
+                        <float>(k + _VTX_DK[v0_idx]) +
+                        t_interp * <float>(_VTX_DK[v1_idx] - _VTX_DK[v0_idx]))
+
+                # Emit triangles to STL buffer
+                t_idx = 0
+                while tri_tbl[cube_idx, t_idx] != -1:
+                    ei0 = tri_tbl[cube_idx, t_idx]
+                    ei1 = tri_tbl[cube_idx, t_idx + 1]
+                    ei2 = tri_tbl[cube_idx, t_idx + 2]
+
+                    buf_off = buf_count * 50
+                    fp = <float*>(&stl_buf[buf_off])
+                    # Normal (placeholder zeros)
+                    fp[0] = 0.0; fp[1] = 0.0; fp[2] = 0.0
+                    # Vertex 0
+                    fp[3] = vert_coords[ei0][0]
+                    fp[4] = vert_coords[ei0][1]
+                    fp[5] = vert_coords[ei0][2]
+                    # Vertex 1
+                    fp[6] = vert_coords[ei1][0]
+                    fp[7] = vert_coords[ei1][1]
+                    fp[8] = vert_coords[ei1][2]
+                    # Vertex 2
+                    fp[9] = vert_coords[ei2][0]
+                    fp[10] = vert_coords[ei2][1]
+                    fp[11] = vert_coords[ei2][2]
+                    # Attribute byte count
+                    up = <unsigned short*>(&stl_buf[buf_off + 48])
+                    up[0] = 0
+
+                    buf_count += 1
+                    tri_count += 1
+                    t_idx += 3
+
+                    if buf_count == BUF_MAX:
+                        f.write(stl_buf_np)
+                        buf_count = 0
+
+        # --- Advance Z-slices ---
+        slice_a_np, slice_b_np = slice_b_np, slice_a_np
+        slice_a = slice_a_np
+        slice_b = slice_b_np
+
+        if k + 2 < pz:
+            # Compute next convolved Z-slice into slice_b
+            if k + 2 >= pz - 1:
+                # Last slice = padding
+                slice_b_np[:] = -1
+                slice_b = slice_b_np
+            else:
+                conv_k = k + 2 - 1  # strided Z
+                with nogil:
+                    for pi in prange(px, num_threads=n_threads,
+                                     schedule='static'):
+                        for pj in range(py):
+                            if (pi == 0 or pi == px - 1 or
+                                    pj == 0 or pj == py - 1):
+                                slice_b[pi, pj] = -1
+                            else:
+                                acc = 0
+                                for di in range(kx):
+                                    s_i = (pi - 1) + di - krx
+                                    for dj in range(ky):
+                                        s_j = (pj - 1) + dj - kry
+                                        for dk in range(kz_dim):
+                                            s_k = conv_k + dk - krz
+                                            f_i = s_i * str_val
+                                            f_j = s_j * str_val
+                                            f_k = s_k * str_val
+                                            if (f_i < 0 or f_i >= <int>rx or
+                                                    f_j < 0 or f_j >= <int>ry or
+                                                    f_k < 0 or f_k >= <int>rz):
+                                                src_val = -1
+                                            else:
+                                                bit_idx = (
+                                                    <long long>f_i +
+                                                    <long long>f_j * rx_ll +
+                                                    <long long>f_k * rxy)
+                                                if (src_ptr[bit_idx >> 3] >>
+                                                        (7 - <int>(bit_idx & 7))
+                                                        ) & 1:
+                                                    src_val = 1
+                                                else:
+                                                    src_val = -1
+                                            acc = acc + <short>(
+                                                <short>src_val *
+                                                <short>kernel[di, dj, dk])
+                                conv_val = <int>acc
+                                if conv_val > 127:
+                                    conv_val = 127
+                                elif conv_val < -128:
+                                    conv_val = -128
+                                slice_b[pi, pj] = <signed char>conv_val
+
+    # Flush remaining buffer
+    if buf_count > 0:
+        f.write(stl_buf_np[:buf_count * 50])
+
+    # Write triangle count
+    f.seek(80)
+    f.write(struct.pack('<I', tri_count))
+    f.close()
+
+    return tri_count
