@@ -1908,6 +1908,20 @@ def fused_stl_export(
     cdef signed char src_val
     cdef int conv_k
 
+    # Face-layer coordinate arrays for vertex dedup (NaN = not computed)
+    # Same topology as sweep_mc_mesh but stores float32[3] coords, not int32 ids
+    lax_np = np.full((px - 1, py, 3), np.nan, dtype=np.float32)
+    lay_np = np.full((px, py - 1, 3), np.nan, dtype=np.float32)
+    lbx_np = np.full((px - 1, py, 3), np.nan, dtype=np.float32)
+    lby_np = np.full((px, py - 1, 3), np.nan, dtype=np.float32)
+    zed_np = np.full((px, py, 3), np.nan, dtype=np.float32)
+
+    cdef float[:, :, ::1] lax = lax_np
+    cdef float[:, :, ::1] lay = lay_np
+    cdef float[:, :, ::1] lbx = lbx_np
+    cdef float[:, :, ::1] lby = lby_np
+    cdef float[:, :, ::1] zed = zed_np
+
     # MC variables
     cdef int i, j, e, t_idx, k
     cdef int cube_idx
@@ -1917,6 +1931,7 @@ def fused_stl_export(
     cdef float v0_val, v1_val, t_interp
     cdef int v0_idx, v1_idx
     cdef int tri_count = 0
+    cdef float vx, vy, vz
 
     # STL write buffer (4096 triangles * 50 bytes = 200 KB)
     cdef int BUF_MAX = 4096
@@ -2008,10 +2023,79 @@ def fused_stl_export(
                 if edges_mask == 0:
                     continue
 
-                # Interpolate vertices on active edges
+                # Look up or interpolate vertices on active edges
                 for e in range(12):
                     if not (edges_mask & (1 << e)):
                         continue
+
+                    # Face-layer lookup (same mapping as sweep_mc_mesh)
+                    if e == 0: vx = lax[i, j, 0]
+                    elif e == 1: vx = lay[i + 1, j, 0]
+                    elif e == 2: vx = lax[i, j + 1, 0]
+                    elif e == 3: vx = lay[i, j, 0]
+                    elif e == 4: vx = lbx[i, j, 0]
+                    elif e == 5: vx = lby[i + 1, j, 0]
+                    elif e == 6: vx = lbx[i, j + 1, 0]
+                    elif e == 7: vx = lby[i, j, 0]
+                    elif e == 8: vx = zed[i, j, 0]
+                    elif e == 9: vx = zed[i + 1, j, 0]
+                    elif e == 10: vx = zed[i + 1, j + 1, 0]
+                    else: vx = zed[i, j + 1, 0]
+
+                    # NaN check: vx == vx is False for NaN
+                    if vx == vx:
+                        # Cached — read all 3 coords
+                        if e == 0:
+                            vert_coords[e][0] = lax[i, j, 0]
+                            vert_coords[e][1] = lax[i, j, 1]
+                            vert_coords[e][2] = lax[i, j, 2]
+                        elif e == 1:
+                            vert_coords[e][0] = lay[i+1, j, 0]
+                            vert_coords[e][1] = lay[i+1, j, 1]
+                            vert_coords[e][2] = lay[i+1, j, 2]
+                        elif e == 2:
+                            vert_coords[e][0] = lax[i, j+1, 0]
+                            vert_coords[e][1] = lax[i, j+1, 1]
+                            vert_coords[e][2] = lax[i, j+1, 2]
+                        elif e == 3:
+                            vert_coords[e][0] = lay[i, j, 0]
+                            vert_coords[e][1] = lay[i, j, 1]
+                            vert_coords[e][2] = lay[i, j, 2]
+                        elif e == 4:
+                            vert_coords[e][0] = lbx[i, j, 0]
+                            vert_coords[e][1] = lbx[i, j, 1]
+                            vert_coords[e][2] = lbx[i, j, 2]
+                        elif e == 5:
+                            vert_coords[e][0] = lby[i+1, j, 0]
+                            vert_coords[e][1] = lby[i+1, j, 1]
+                            vert_coords[e][2] = lby[i+1, j, 2]
+                        elif e == 6:
+                            vert_coords[e][0] = lbx[i, j+1, 0]
+                            vert_coords[e][1] = lbx[i, j+1, 1]
+                            vert_coords[e][2] = lbx[i, j+1, 2]
+                        elif e == 7:
+                            vert_coords[e][0] = lby[i, j, 0]
+                            vert_coords[e][1] = lby[i, j, 1]
+                            vert_coords[e][2] = lby[i, j, 2]
+                        elif e == 8:
+                            vert_coords[e][0] = zed[i, j, 0]
+                            vert_coords[e][1] = zed[i, j, 1]
+                            vert_coords[e][2] = zed[i, j, 2]
+                        elif e == 9:
+                            vert_coords[e][0] = zed[i+1, j, 0]
+                            vert_coords[e][1] = zed[i+1, j, 1]
+                            vert_coords[e][2] = zed[i+1, j, 2]
+                        elif e == 10:
+                            vert_coords[e][0] = zed[i+1, j+1, 0]
+                            vert_coords[e][1] = zed[i+1, j+1, 1]
+                            vert_coords[e][2] = zed[i+1, j+1, 2]
+                        else:
+                            vert_coords[e][0] = zed[i, j+1, 0]
+                            vert_coords[e][1] = zed[i, j+1, 1]
+                            vert_coords[e][2] = zed[i, j+1, 2]
+                        continue
+
+                    # Not cached — interpolate and store
                     v0_idx = _EDGE_V0[e]
                     v1_idx = _EDGE_V1[e]
                     v0_val = corner_vals[v0_idx]
@@ -2029,6 +2113,56 @@ def fused_stl_export(
                     vert_coords[e][2] = mc_oz + mc_vsz * (
                         <float>(k + _VTX_DK[v0_idx]) +
                         t_interp * <float>(_VTX_DK[v1_idx] - _VTX_DK[v0_idx]))
+
+                    # Cache in face-layer
+                    if e == 0:
+                        lax[i, j, 0] = vert_coords[e][0]
+                        lax[i, j, 1] = vert_coords[e][1]
+                        lax[i, j, 2] = vert_coords[e][2]
+                    elif e == 1:
+                        lay[i+1, j, 0] = vert_coords[e][0]
+                        lay[i+1, j, 1] = vert_coords[e][1]
+                        lay[i+1, j, 2] = vert_coords[e][2]
+                    elif e == 2:
+                        lax[i, j+1, 0] = vert_coords[e][0]
+                        lax[i, j+1, 1] = vert_coords[e][1]
+                        lax[i, j+1, 2] = vert_coords[e][2]
+                    elif e == 3:
+                        lay[i, j, 0] = vert_coords[e][0]
+                        lay[i, j, 1] = vert_coords[e][1]
+                        lay[i, j, 2] = vert_coords[e][2]
+                    elif e == 4:
+                        lbx[i, j, 0] = vert_coords[e][0]
+                        lbx[i, j, 1] = vert_coords[e][1]
+                        lbx[i, j, 2] = vert_coords[e][2]
+                    elif e == 5:
+                        lby[i+1, j, 0] = vert_coords[e][0]
+                        lby[i+1, j, 1] = vert_coords[e][1]
+                        lby[i+1, j, 2] = vert_coords[e][2]
+                    elif e == 6:
+                        lbx[i, j+1, 0] = vert_coords[e][0]
+                        lbx[i, j+1, 1] = vert_coords[e][1]
+                        lbx[i, j+1, 2] = vert_coords[e][2]
+                    elif e == 7:
+                        lby[i, j, 0] = vert_coords[e][0]
+                        lby[i, j, 1] = vert_coords[e][1]
+                        lby[i, j, 2] = vert_coords[e][2]
+                    elif e == 8:
+                        zed[i, j, 0] = vert_coords[e][0]
+                        zed[i, j, 1] = vert_coords[e][1]
+                        zed[i, j, 2] = vert_coords[e][2]
+                    elif e == 9:
+                        zed[i+1, j, 0] = vert_coords[e][0]
+                        zed[i+1, j, 1] = vert_coords[e][1]
+                        zed[i+1, j, 2] = vert_coords[e][2]
+                    elif e == 10:
+                        zed[i+1, j+1, 0] = vert_coords[e][0]
+                        zed[i+1, j+1, 1] = vert_coords[e][1]
+                        zed[i+1, j+1, 2] = vert_coords[e][2]
+                    else:
+                        zed[i, j+1, 0] = vert_coords[e][0]
+                        zed[i, j+1, 1] = vert_coords[e][1]
+                        zed[i, j+1, 2] = vert_coords[e][2]
 
                 # Emit triangles to STL buffer
                 t_idx = 0
@@ -2065,10 +2199,17 @@ def fused_stl_export(
                         f.write(stl_buf_np)
                         buf_count = 0
 
-        # --- Advance Z-slices ---
+        # --- Advance Z-slices and face layers ---
         slice_a_np, slice_b_np = slice_b_np, slice_a_np
         slice_a = slice_a_np
         slice_b = slice_b_np
+
+        # Swap face layers: top becomes bottom, reset top + z-edges
+        lax_np, lbx_np = lbx_np, lax_np
+        lay_np, lby_np = lby_np, lay_np
+        lax = lax_np; lay = lay_np
+        lbx_np[:] = np.nan; lby_np[:] = np.nan; zed_np[:] = np.nan
+        lbx = lbx_np; lby = lby_np; zed = zed_np
 
         if k + 2 < pz:
             # Compute next convolved Z-slice into slice_b
