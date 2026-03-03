@@ -1954,6 +1954,8 @@ def fused_stl_export(
     cdef int v0_idx, v1_idx
     cdef int tri_count = 0
     cdef float vx, vy, vz
+    # Cross-product normal computation
+    cdef float ux, uy, uz, wx, wy, wz, nn
 
     # Face-layer jump table: pointers + strides for indexed edge dispatch
     cdef float *layer_ptrs[5]
@@ -2122,8 +2124,22 @@ def fused_stl_export(
 
                     buf_off = buf_count * 50
                     fptr = <float*>(&stl_buf[buf_off])
-                    # Normal (placeholder zeros)
-                    fptr[0] = 0.0; fptr[1] = 0.0; fptr[2] = 0.0
+                    # Compute face normal via cross product (v1-v0) x (v2-v0)
+                    ux = vert_coords[ei1][0] - vert_coords[ei0][0]
+                    uy = vert_coords[ei1][1] - vert_coords[ei0][1]
+                    uz = vert_coords[ei1][2] - vert_coords[ei0][2]
+                    wx = vert_coords[ei2][0] - vert_coords[ei0][0]
+                    wy = vert_coords[ei2][1] - vert_coords[ei0][1]
+                    wz = vert_coords[ei2][2] - vert_coords[ei0][2]
+                    fptr[0] = uy * wz - uz * wy
+                    fptr[1] = uz * wx - ux * wz
+                    fptr[2] = ux * wy - uy * wx
+                    # Normalize
+                    nn = sqrt(fptr[0]*fptr[0] + fptr[1]*fptr[1] + fptr[2]*fptr[2])
+                    if nn > 0.0:
+                        fptr[0] = fptr[0] / nn
+                        fptr[1] = fptr[1] / nn
+                        fptr[2] = fptr[2] / nn
                     # Vertex 0
                     fptr[3] = vert_coords[ei0][0]
                     fptr[4] = vert_coords[ei0][1]
