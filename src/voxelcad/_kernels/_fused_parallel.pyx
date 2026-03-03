@@ -1589,3 +1589,218 @@ def streaming_mc_stl(
     f.close()
 
     return tri_count
+
+
+def sweep_mc_mesh(
+    const signed char[:, :, ::1] sdf,
+    float vsx, float vsy, float vsz,
+    float ox=0.0, float oy=0.0, float oz=0.0,
+    float isovalue=0.0,
+):
+    """Sweep-plane marching cubes with face-layer vertex dedup.
+
+    Based on Lorensen & Cline's Marching Cubes algorithm [1] with
+    sweep-plane vertex sharing inspired by scikit-image's Lewiner MC
+    implementation [2,3]. Each edge vertex is computed once and shared
+    by all adjacent cells via face-layer index arrays, producing
+    manifold output by construction without post-MC dedup.
+
+    Two layers of edge-to-vertex-index arrays (bottom/top z-face) are
+    swapped per Z-slice advance. Memory: ~5 * nx * ny * 4 bytes.
+
+    References:
+        [1] Lorensen & Cline, "Marching Cubes: A High Resolution 3D
+            Surface Construction Algorithm", SIGGRAPH 1987.
+        [2] Lewiner et al., "Efficient Implementation of Marching Cubes'
+            Cases with Topological Guarantees", J. Graphics Tools 2003.
+        [3] scikit-image _marching_cubes_lewiner_cy.pyx — face-layer
+            edge caching pattern for O(1) vertex sharing.
+
+    Args:
+        sdf: int8 SDF array, C-contiguous, shape (nx, ny, nz)
+        vsx, vsy, vsz: voxel spacing per axis
+        ox, oy, oz: origin offset
+        isovalue: isosurface level (typically 0.0)
+
+    Returns:
+        tuple (vertices, faces):
+            vertices: float32 array (N, 3) — deduplicated
+            faces: int32 array (M, 3) — triangle vertex indices
+    """
+    from voxelcad._kernels._mc_tables import EDGE_TABLE, TRI_TABLE
+
+    cdef int nx = sdf.shape[0]
+    cdef int ny = sdf.shape[1]
+    cdef int nz = sdf.shape[2]
+
+    cdef unsigned short[::1] edge_tbl = EDGE_TABLE
+    cdef signed char[:, ::1] tri_tbl = TRI_TABLE
+
+    # Face-layer arrays for vertex dedup.
+    # x-edges at z=k: between (i,j,k) and (i+1,j,k), shape (nx-1, ny)
+    # y-edges at z=k: between (i,j,k) and (i,j+1,k), shape (nx, ny-1)
+    # z-edges:        between (i,j,k) and (i,j,k+1), shape (nx, ny)
+    layer_a_x_np = np.full((nx - 1, ny), -1, dtype=np.int32)
+    layer_a_y_np = np.full((nx, ny - 1), -1, dtype=np.int32)
+    layer_b_x_np = np.full((nx - 1, ny), -1, dtype=np.int32)
+    layer_b_y_np = np.full((nx, ny - 1), -1, dtype=np.int32)
+    z_edges_np = np.full((nx, ny), -1, dtype=np.int32)
+
+    cdef int[:, ::1] lax = layer_a_x_np
+    cdef int[:, ::1] lay = layer_a_y_np
+    cdef int[:, ::1] lbx = layer_b_x_np
+    cdef int[:, ::1] lby = layer_b_y_np
+    cdef int[:, ::1] zed = z_edges_np
+
+    # Pre-allocate output (conservative estimate)
+    cdef int est_tris = max(4 * (nx * ny + ny * nz + nx * nz), 64)
+    verts_np = np.empty((est_tris, 3), dtype=np.float32)
+    faces_np = np.empty((est_tris, 3), dtype=np.int32)
+    cdef float[:, ::1] verts = verts_np
+    cdef int[:, ::1] faces = faces_np
+    cdef int n_verts = 0
+    cdef int n_faces = 0
+
+    cdef int i, j, k, e, t_idx
+    cdef int cube_idx, vid
+    cdef unsigned short edges
+    cdef float vals[8]
+    cdef int edge_vids[12]
+    cdef float v0_val, v1_val, t_interp
+    cdef int v0_idx, v1_idx
+
+    for k in range(nz - 1):
+        # Reset top-face layers and z-edges for this slice
+        layer_b_x_np[:] = -1
+        layer_b_y_np[:] = -1
+        z_edges_np[:] = -1
+        lbx = layer_b_x_np
+        lby = layer_b_y_np
+        zed = z_edges_np
+
+        for j in range(ny - 1):
+            for i in range(nx - 1):
+                # Read 8 corner values
+                vals[0] = <float>sdf[i, j, k]
+                vals[1] = <float>sdf[i+1, j, k]
+                vals[2] = <float>sdf[i+1, j+1, k]
+                vals[3] = <float>sdf[i, j+1, k]
+                vals[4] = <float>sdf[i, j, k+1]
+                vals[5] = <float>sdf[i+1, j, k+1]
+                vals[6] = <float>sdf[i+1, j+1, k+1]
+                vals[7] = <float>sdf[i, j+1, k+1]
+
+                # Compute cube index
+                cube_idx = 0
+                if vals[0] < isovalue: cube_idx |= 1
+                if vals[1] < isovalue: cube_idx |= 2
+                if vals[2] < isovalue: cube_idx |= 4
+                if vals[3] < isovalue: cube_idx |= 8
+                if vals[4] < isovalue: cube_idx |= 16
+                if vals[5] < isovalue: cube_idx |= 32
+                if vals[6] < isovalue: cube_idx |= 64
+                if vals[7] < isovalue: cube_idx |= 128
+
+                edges = edge_tbl[cube_idx]
+                if edges == 0:
+                    continue
+
+                # Look up or create vertex for each active edge
+                for e in range(12):
+                    if not (edges & (1 << e)):
+                        edge_vids[e] = -1
+                        continue
+
+                    # Face-layer lookup: which array holds this edge?
+                    # e0:  x-edge at (i, j, k)      -> lax[i, j]
+                    # e1:  y-edge at (i+1, j, k)    -> lay[i+1, j]
+                    # e2:  x-edge at (i, j+1, k)    -> lax[i, j+1]
+                    # e3:  y-edge at (i, j, k)      -> lay[i, j]
+                    # e4:  x-edge at (i, j, k+1)    -> lbx[i, j]
+                    # e5:  y-edge at (i+1, j, k+1)  -> lby[i+1, j]
+                    # e6:  x-edge at (i, j+1, k+1)  -> lbx[i, j+1]
+                    # e7:  y-edge at (i, j, k+1)    -> lby[i, j]
+                    # e8:  z-edge at (i, j)          -> zed[i, j]
+                    # e9:  z-edge at (i+1, j)        -> zed[i+1, j]
+                    # e10: z-edge at (i+1, j+1)      -> zed[i+1, j+1]
+                    # e11: z-edge at (i, j+1)        -> zed[i, j+1]
+                    if e == 0: vid = lax[i, j]
+                    elif e == 1: vid = lay[i + 1, j]
+                    elif e == 2: vid = lax[i, j + 1]
+                    elif e == 3: vid = lay[i, j]
+                    elif e == 4: vid = lbx[i, j]
+                    elif e == 5: vid = lby[i + 1, j]
+                    elif e == 6: vid = lbx[i, j + 1]
+                    elif e == 7: vid = lby[i, j]
+                    elif e == 8: vid = zed[i, j]
+                    elif e == 9: vid = zed[i + 1, j]
+                    elif e == 10: vid = zed[i + 1, j + 1]
+                    else: vid = zed[i, j + 1]
+
+                    if vid >= 0:
+                        edge_vids[e] = vid
+                        continue
+
+                    # Vertex not yet created — interpolate
+                    if n_verts >= verts_np.shape[0]:
+                        new_size = verts_np.shape[0] * 2
+                        verts_np.resize((new_size, 3), refcheck=False)
+                        verts = verts_np
+
+                    v0_idx = _EDGE_V0[e]
+                    v1_idx = _EDGE_V1[e]
+                    v0_val = vals[v0_idx]
+                    v1_val = vals[v1_idx]
+                    if v0_val == v1_val:
+                        t_interp = 0.5
+                    else:
+                        t_interp = (isovalue - v0_val) / (v1_val - v0_val)
+                    verts[n_verts, 0] = ox + vsx * (
+                        <float>(i + _VTX_DI[v0_idx]) +
+                        t_interp * <float>(_VTX_DI[v1_idx] - _VTX_DI[v0_idx]))
+                    verts[n_verts, 1] = oy + vsy * (
+                        <float>(j + _VTX_DJ[v0_idx]) +
+                        t_interp * <float>(_VTX_DJ[v1_idx] - _VTX_DJ[v0_idx]))
+                    verts[n_verts, 2] = oz + vsz * (
+                        <float>(k + _VTX_DK[v0_idx]) +
+                        t_interp * <float>(_VTX_DK[v1_idx] - _VTX_DK[v0_idx]))
+
+                    vid = n_verts
+                    n_verts += 1
+                    edge_vids[e] = vid
+
+                    # Store in face-layer
+                    if e == 0: lax[i, j] = vid
+                    elif e == 1: lay[i + 1, j] = vid
+                    elif e == 2: lax[i, j + 1] = vid
+                    elif e == 3: lay[i, j] = vid
+                    elif e == 4: lbx[i, j] = vid
+                    elif e == 5: lby[i + 1, j] = vid
+                    elif e == 6: lbx[i, j + 1] = vid
+                    elif e == 7: lby[i, j] = vid
+                    elif e == 8: zed[i, j] = vid
+                    elif e == 9: zed[i + 1, j] = vid
+                    elif e == 10: zed[i + 1, j + 1] = vid
+                    else: zed[i, j + 1] = vid
+
+                # Emit triangles using shared vertex indices
+                t_idx = 0
+                while tri_tbl[cube_idx, t_idx] != -1:
+                    if n_faces >= faces_np.shape[0]:
+                        new_size = faces_np.shape[0] * 2
+                        faces_np.resize((new_size, 3), refcheck=False)
+                        faces = faces_np
+
+                    faces[n_faces, 0] = edge_vids[tri_tbl[cube_idx, t_idx]]
+                    faces[n_faces, 1] = edge_vids[tri_tbl[cube_idx, t_idx + 1]]
+                    faces[n_faces, 2] = edge_vids[tri_tbl[cube_idx, t_idx + 2]]
+                    n_faces += 1
+                    t_idx += 3
+
+        # Swap layers: top becomes bottom for next Z-slice
+        layer_a_x_np, layer_b_x_np = layer_b_x_np, layer_a_x_np
+        layer_a_y_np, layer_b_y_np = layer_b_y_np, layer_a_y_np
+        lax = layer_a_x_np
+        lay = layer_a_y_np
+
+    return verts_np[:n_verts].copy(), faces_np[:n_faces].copy()

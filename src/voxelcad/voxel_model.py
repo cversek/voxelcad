@@ -422,25 +422,15 @@ class VoxelModel:
         # --- Marching cubes (shared by both paths) ---
         vsv = self.grid.voxel_size_vector * mc_stride
         _t0 = time.time()
-        from voxelcad._kernels import streaming_mc_mesh as _cython_mc
+        from voxelcad._kernels import sweep_mc_mesh as _cython_mc
         if _cython_mc is not None:
-            LOGGER.info(f"\tCython streaming MC (isovalue={isovalue})...")
+            LOGGER.info(f"\tCython sweep-plane MC (isovalue={isovalue})...")
             sf_c = np.ascontiguousarray(scalar_field)
             del scalar_field
             verts, faces = _cython_mc(
                 sf_c, vsv[0], vsv[1], vsv[2],
                 isovalue=isovalue)
             del sf_c
-            # Deduplicate vertices (streaming MC emits 3 per triangle).
-            # Quantize to grid resolution to merge float rounding diffs.
-            if verts.shape[0] > 0:
-                scale = 1e4 / max(vsv[0], vsv[1], vsv[2])
-                qv = np.round(verts * scale).astype(np.int32)
-                _, idx, inv = np.unique(
-                    qv.view(np.dtype((np.void, 12))),
-                    return_index=True, return_inverse=True)
-                verts = verts[idx]
-                faces = inv[faces.ravel()].reshape(-1, 3).astype(np.int32)
             import pyvista as pv
             if faces.shape[0] > 0:
                 pv_faces = np.column_stack([

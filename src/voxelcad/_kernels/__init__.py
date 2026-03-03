@@ -26,6 +26,7 @@ convolve_sdf_spatial = None
 fused_scale_convolve = None
 streaming_mc_mesh = None
 streaming_mc_stl = None
+sweep_mc_mesh = None
 
 try:
     from ._fused_parallel import (
@@ -41,6 +42,7 @@ try:
         fused_scale_convolve,
         streaming_mc_mesh,
         streaming_mc_stl,
+        sweep_mc_mesh,
         _detect_p_cores,
         _get_optimal_threads,
     )
@@ -62,4 +64,5 @@ __all__ = [
     'fused_scale_convolve',
     'streaming_mc_mesh',
     'streaming_mc_stl',
+    'sweep_mc_mesh',
 ]
