@@ -17,6 +17,7 @@ import os
 import numpy as np
 cimport numpy as np
 from libc.math cimport cos, sin, fabs, sqrt, pow as cpow
+from libc.stdio cimport fopen, fwrite, fseek, fclose, FILE, SEEK_SET
 from libc.string cimport memset
 from cython.parallel cimport prange
 
@@ -1846,7 +1847,6 @@ def fused_stl_export(
     Returns:
         int: number of triangles written
     """
-    import struct
     from voxelcad._kernels._mc_tables import EDGE_TABLE, TRI_TABLE
 
     # Strided output dimensions (same as fused_scale_convolve)
@@ -1938,7 +1938,7 @@ def fused_stl_export(
     stl_buf_np = np.zeros(BUF_MAX * 50, dtype=np.uint8)
     cdef unsigned char[::1] stl_buf_view = stl_buf_np
     cdef unsigned char *stl_buf = &stl_buf_view[0]
-    cdef float *fp
+    cdef float *fptr
     cdef unsigned short *up
     cdef int buf_count = 0
     cdef int buf_off
@@ -1947,10 +1947,15 @@ def fused_stl_export(
     if n_threads <= 0:
         n_threads = _get_optimal_threads(px)
 
-    # Open file, write STL header + placeholder count
-    f = open(filename, 'wb')
-    f.write(b'\x00' * 80)
-    f.write(struct.pack('<I', 0))
+    # Open file with C-level I/O (no GIL needed for writes)
+    cdef bytes fn_bytes = filename.encode('utf-8')
+    cdef FILE *fp = fopen(fn_bytes, "wb")
+    if fp == NULL:
+        raise IOError(f"Cannot open file: {filename}")
+    # Write STL header (80 zero bytes) + placeholder triangle count (4 bytes)
+    cdef unsigned char c_header[84]
+    memset(c_header, 0, 84)
+    fwrite(c_header, 1, 84, fp)
 
     # --- Compute initial slice_b (z=1) ---
     # slice_a (z=0) is already all -1 (padding)
@@ -2172,21 +2177,21 @@ def fused_stl_export(
                     ei2 = tri_tbl[cube_idx, t_idx + 2]
 
                     buf_off = buf_count * 50
-                    fp = <float*>(&stl_buf[buf_off])
+                    fptr = <float*>(&stl_buf[buf_off])
                     # Normal (placeholder zeros)
-                    fp[0] = 0.0; fp[1] = 0.0; fp[2] = 0.0
+                    fptr[0] = 0.0; fptr[1] = 0.0; fptr[2] = 0.0
                     # Vertex 0
-                    fp[3] = vert_coords[ei0][0]
-                    fp[4] = vert_coords[ei0][1]
-                    fp[5] = vert_coords[ei0][2]
+                    fptr[3] = vert_coords[ei0][0]
+                    fptr[4] = vert_coords[ei0][1]
+                    fptr[5] = vert_coords[ei0][2]
                     # Vertex 1
-                    fp[6] = vert_coords[ei1][0]
-                    fp[7] = vert_coords[ei1][1]
-                    fp[8] = vert_coords[ei1][2]
+                    fptr[6] = vert_coords[ei1][0]
+                    fptr[7] = vert_coords[ei1][1]
+                    fptr[8] = vert_coords[ei1][2]
                     # Vertex 2
-                    fp[9] = vert_coords[ei2][0]
-                    fp[10] = vert_coords[ei2][1]
-                    fp[11] = vert_coords[ei2][2]
+                    fptr[9] = vert_coords[ei2][0]
+                    fptr[10] = vert_coords[ei2][1]
+                    fptr[11] = vert_coords[ei2][2]
                     # Attribute byte count
                     up = <unsigned short*>(&stl_buf[buf_off + 48])
                     up[0] = 0
@@ -2196,7 +2201,7 @@ def fused_stl_export(
                     t_idx += 3
 
                     if buf_count == BUF_MAX:
-                        f.write(stl_buf_np)
+                        fwrite(stl_buf, 1, BUF_MAX * 50, fp)
                         buf_count = 0
 
         # --- Advance Z-slices and face layers ---
@@ -2208,7 +2213,10 @@ def fused_stl_export(
         lax_np, lbx_np = lbx_np, lax_np
         lay_np, lby_np = lby_np, lay_np
         lax = lax_np; lay = lay_np
-        lbx_np[:] = np.nan; lby_np[:] = np.nan; zed_np[:] = np.nan
+        # Reset face layers with NaN via 0xFF memset (all-1s = quiet NaN)
+        memset(&lbx[0, 0, 0], 0xFF, (px - 1) * py * 3 * sizeof(float))
+        memset(&lby[0, 0, 0], 0xFF, px * (py - 1) * 3 * sizeof(float))
+        memset(&zed[0, 0, 0], 0xFF, px * py * 3 * sizeof(float))
         lbx = lbx_np; lby = lby_np; zed = zed_np
 
         if k + 2 < pz:
@@ -2264,11 +2272,12 @@ def fused_stl_export(
 
     # Flush remaining buffer
     if buf_count > 0:
-        f.write(stl_buf_np[:buf_count * 50])
+        fwrite(stl_buf, 1, buf_count * 50, fp)
 
-    # Write triangle count
-    f.seek(80)
-    f.write(struct.pack('<I', tri_count))
-    f.close()
+    # Write triangle count at byte 80
+    cdef unsigned int tri_count_u = <unsigned int>tri_count
+    fseek(fp, 80, SEEK_SET)
+    fwrite(&tri_count_u, 4, 1, fp)
+    fclose(fp)
 
     return tri_count
