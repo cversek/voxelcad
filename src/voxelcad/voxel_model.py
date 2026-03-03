@@ -647,13 +647,24 @@ class VoxelModel:
         if ext == ".stl":
             isovalue = kwargs.pop('isovalue', 0.0)
             lowpass_cutoff = kwargs.pop('lowpass_cutoff', 0.25)
+            lowpass_order = kwargs.pop('lowpass_order', 4)
             only_largest = kwargs.pop('only_largest_component', False)
             cache = kwargs.pop('cache', True)
             target_reduction = kwargs.pop('target_reduction', 0.0)
             mc_stride = kwargs.pop('mc_stride', 2)
+            method = kwargs.pop('method', 'auto')
+            # Lazy render guard — fused path needs packed voxel_data
+            if self.voxel_data is None:
+                self.render_volume()
             # Fully fused STL: packed bits -> STL file (no intermediates)
+            # Only for fast_smooth-compatible requests (iso=0.0)
             from voxelcad._kernels import fused_stl_export as _fused_stl
-            if _fused_stl is not None and self.voxel_data is not None:
+            use_fused = (
+                _fused_stl is not None
+                and method in ('auto', 'fast_smooth')
+                and isovalue == 0.0
+            )
+            if use_fused:
                 _t0 = time.time()
                 LOGGER.info(f"\tfused STL export (no intermediate volumes)...")
                 from voxelcad.utils.spectral import compute_butterworth_kernel
@@ -668,16 +679,19 @@ class VoxelModel:
                 LOGGER.info(f"\t...fused STL completed: {n_tris} tris "
                             f"in {time.time()-_t0:.2f} s")
             else:
-                LOGGER.warning(
-                    "fused_stl_export unavailable, falling back to "
-                    "render_surface_mesh + save")
+                if _fused_stl is None:
+                    LOGGER.warning(
+                        "fused_stl_export unavailable, falling back to "
+                        "render_surface_mesh + save")
                 surf_mesh = self.render_surface_mesh(
                     isovalue=isovalue,
                     lowpass_cutoff=lowpass_cutoff,
+                    lowpass_order=lowpass_order,
                     cache=cache,
                     only_largest_component=only_largest,
                     target_reduction=target_reduction,
                     mc_stride=mc_stride,
+                    method=method,
                 )
                 _t0 = time.time()
                 LOGGER.info(f"\tsaving STL ({surf_mesh.n_cells} tris)...")
