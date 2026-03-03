@@ -1344,6 +1344,28 @@ _VTX_DI[5]=1; _VTX_DJ[5]=0; _VTX_DK[5]=1
 _VTX_DI[6]=1; _VTX_DJ[6]=1; _VTX_DK[6]=1
 _VTX_DI[7]=0; _VTX_DJ[7]=1; _VTX_DK[7]=1
 
+# Face-layer edge dispatch table: maps MC edge index (0-11) to
+# layer id (0=lax,1=lay,2=lbx,3=lby,4=zed) and (di,dj) offsets.
+# Replaces 36-branch if/elif cascade with indexed pointer access.
+cdef int _EDGE_LAYER[12]
+cdef int _EDGE_DI_OFF[12]
+cdef int _EDGE_DJ_OFF[12]
+# e0: lax[i,j]    e1: lay[i+1,j]  e2: lax[i,j+1]  e3: lay[i,j]
+_EDGE_LAYER[0]=0; _EDGE_DI_OFF[0]=0; _EDGE_DJ_OFF[0]=0
+_EDGE_LAYER[1]=1; _EDGE_DI_OFF[1]=1; _EDGE_DJ_OFF[1]=0
+_EDGE_LAYER[2]=0; _EDGE_DI_OFF[2]=0; _EDGE_DJ_OFF[2]=1
+_EDGE_LAYER[3]=1; _EDGE_DI_OFF[3]=0; _EDGE_DJ_OFF[3]=0
+# e4: lbx[i,j]    e5: lby[i+1,j]  e6: lbx[i,j+1]  e7: lby[i,j]
+_EDGE_LAYER[4]=2; _EDGE_DI_OFF[4]=0; _EDGE_DJ_OFF[4]=0
+_EDGE_LAYER[5]=3; _EDGE_DI_OFF[5]=1; _EDGE_DJ_OFF[5]=0
+_EDGE_LAYER[6]=2; _EDGE_DI_OFF[6]=0; _EDGE_DJ_OFF[6]=1
+_EDGE_LAYER[7]=3; _EDGE_DI_OFF[7]=0; _EDGE_DJ_OFF[7]=0
+# e8: zed[i,j]    e9: zed[i+1,j]  e10: zed[i+1,j+1]  e11: zed[i,j+1]
+_EDGE_LAYER[8]=4;  _EDGE_DI_OFF[8]=0;  _EDGE_DJ_OFF[8]=0
+_EDGE_LAYER[9]=4;  _EDGE_DI_OFF[9]=1;  _EDGE_DJ_OFF[9]=0
+_EDGE_LAYER[10]=4; _EDGE_DI_OFF[10]=1; _EDGE_DJ_OFF[10]=1
+_EDGE_LAYER[11]=4; _EDGE_DI_OFF[11]=0; _EDGE_DJ_OFF[11]=1
+
 
 def streaming_mc_mesh(
     const signed char[:, :, ::1] sdf,
@@ -1933,6 +1955,12 @@ def fused_stl_export(
     cdef int tri_count = 0
     cdef float vx, vy, vz
 
+    # Face-layer jump table: pointers + strides for indexed edge dispatch
+    cdef float *layer_ptrs[5]
+    cdef int layer_jstride[5]
+    cdef int fl_li, fl_off
+    cdef float *fl_p
+
     # STL write buffer (4096 triangles * 50 bytes = 200 KB)
     cdef int BUF_MAX = 4096
     stl_buf_np = np.zeros(BUF_MAX * 50, dtype=np.uint8)
@@ -2000,6 +2028,19 @@ def fused_stl_export(
                         conv_val = -128
                     slice_b[pi, pj] = <signed char>conv_val
 
+    # --- Init face-layer jump table ---
+    # layer_jstride[L] = number of floats per i-row in layer L
+    layer_jstride[0] = py * 3       # lax: (px-1, py, 3)
+    layer_jstride[1] = (py-1) * 3   # lay: (px, py-1, 3)
+    layer_jstride[2] = py * 3       # lbx: (px-1, py, 3)
+    layer_jstride[3] = (py-1) * 3   # lby: (px, py-1, 3)
+    layer_jstride[4] = py * 3       # zed: (px, py, 3)
+    layer_ptrs[0] = &lax[0, 0, 0]
+    layer_ptrs[1] = &lay[0, 0, 0]
+    layer_ptrs[2] = &lbx[0, 0, 0]
+    layer_ptrs[3] = &lby[0, 0, 0]
+    layer_ptrs[4] = &zed[0, 0, 0]
+
     # --- Main Z-sweep: MC on slice pairs + STL write ---
     for k in range(pz - 1):
         # MC on slice_a(z=k), slice_b(z=k+1)
@@ -2033,71 +2074,19 @@ def fused_stl_export(
                     if not (edges_mask & (1 << e)):
                         continue
 
-                    # Face-layer lookup (same mapping as sweep_mc_mesh)
-                    if e == 0: vx = lax[i, j, 0]
-                    elif e == 1: vx = lay[i + 1, j, 0]
-                    elif e == 2: vx = lax[i, j + 1, 0]
-                    elif e == 3: vx = lay[i, j, 0]
-                    elif e == 4: vx = lbx[i, j, 0]
-                    elif e == 5: vx = lby[i + 1, j, 0]
-                    elif e == 6: vx = lbx[i, j + 1, 0]
-                    elif e == 7: vx = lby[i, j, 0]
-                    elif e == 8: vx = zed[i, j, 0]
-                    elif e == 9: vx = zed[i + 1, j, 0]
-                    elif e == 10: vx = zed[i + 1, j + 1, 0]
-                    else: vx = zed[i, j + 1, 0]
+                    # Indexed face-layer lookup via jump table
+                    fl_li = _EDGE_LAYER[e]
+                    fl_p = layer_ptrs[fl_li]
+                    fl_off = ((i + _EDGE_DI_OFF[e]) * layer_jstride[fl_li]
+                              + (j + _EDGE_DJ_OFF[e]) * 3)
+                    vx = fl_p[fl_off]
 
                     # NaN check: vx == vx is False for NaN
                     if vx == vx:
-                        # Cached — read all 3 coords
-                        if e == 0:
-                            vert_coords[e][0] = lax[i, j, 0]
-                            vert_coords[e][1] = lax[i, j, 1]
-                            vert_coords[e][2] = lax[i, j, 2]
-                        elif e == 1:
-                            vert_coords[e][0] = lay[i+1, j, 0]
-                            vert_coords[e][1] = lay[i+1, j, 1]
-                            vert_coords[e][2] = lay[i+1, j, 2]
-                        elif e == 2:
-                            vert_coords[e][0] = lax[i, j+1, 0]
-                            vert_coords[e][1] = lax[i, j+1, 1]
-                            vert_coords[e][2] = lax[i, j+1, 2]
-                        elif e == 3:
-                            vert_coords[e][0] = lay[i, j, 0]
-                            vert_coords[e][1] = lay[i, j, 1]
-                            vert_coords[e][2] = lay[i, j, 2]
-                        elif e == 4:
-                            vert_coords[e][0] = lbx[i, j, 0]
-                            vert_coords[e][1] = lbx[i, j, 1]
-                            vert_coords[e][2] = lbx[i, j, 2]
-                        elif e == 5:
-                            vert_coords[e][0] = lby[i+1, j, 0]
-                            vert_coords[e][1] = lby[i+1, j, 1]
-                            vert_coords[e][2] = lby[i+1, j, 2]
-                        elif e == 6:
-                            vert_coords[e][0] = lbx[i, j+1, 0]
-                            vert_coords[e][1] = lbx[i, j+1, 1]
-                            vert_coords[e][2] = lbx[i, j+1, 2]
-                        elif e == 7:
-                            vert_coords[e][0] = lby[i, j, 0]
-                            vert_coords[e][1] = lby[i, j, 1]
-                            vert_coords[e][2] = lby[i, j, 2]
-                        elif e == 8:
-                            vert_coords[e][0] = zed[i, j, 0]
-                            vert_coords[e][1] = zed[i, j, 1]
-                            vert_coords[e][2] = zed[i, j, 2]
-                        elif e == 9:
-                            vert_coords[e][0] = zed[i+1, j, 0]
-                            vert_coords[e][1] = zed[i+1, j, 1]
-                            vert_coords[e][2] = zed[i+1, j, 2]
-                        elif e == 10:
-                            vert_coords[e][0] = zed[i+1, j+1, 0]
-                            vert_coords[e][1] = zed[i+1, j+1, 1]
-                            vert_coords[e][2] = zed[i+1, j+1, 2]
-                        else:
-                            vert_coords[e][0] = zed[i, j+1, 0]
-                            vert_coords[e][1] = zed[i, j+1, 1]
-                            vert_coords[e][2] = zed[i, j+1, 2]
+                        # Cached — read all 3 coords via pointer
+                        vert_coords[e][0] = fl_p[fl_off]
+                        vert_coords[e][1] = fl_p[fl_off + 1]
+                        vert_coords[e][2] = fl_p[fl_off + 2]
                         continue
 
                     # Not cached — interpolate and store
@@ -2119,55 +2108,10 @@ def fused_stl_export(
                         <float>(k + _VTX_DK[v0_idx]) +
                         t_interp * <float>(_VTX_DK[v1_idx] - _VTX_DK[v0_idx]))
 
-                    # Cache in face-layer
-                    if e == 0:
-                        lax[i, j, 0] = vert_coords[e][0]
-                        lax[i, j, 1] = vert_coords[e][1]
-                        lax[i, j, 2] = vert_coords[e][2]
-                    elif e == 1:
-                        lay[i+1, j, 0] = vert_coords[e][0]
-                        lay[i+1, j, 1] = vert_coords[e][1]
-                        lay[i+1, j, 2] = vert_coords[e][2]
-                    elif e == 2:
-                        lax[i, j+1, 0] = vert_coords[e][0]
-                        lax[i, j+1, 1] = vert_coords[e][1]
-                        lax[i, j+1, 2] = vert_coords[e][2]
-                    elif e == 3:
-                        lay[i, j, 0] = vert_coords[e][0]
-                        lay[i, j, 1] = vert_coords[e][1]
-                        lay[i, j, 2] = vert_coords[e][2]
-                    elif e == 4:
-                        lbx[i, j, 0] = vert_coords[e][0]
-                        lbx[i, j, 1] = vert_coords[e][1]
-                        lbx[i, j, 2] = vert_coords[e][2]
-                    elif e == 5:
-                        lby[i+1, j, 0] = vert_coords[e][0]
-                        lby[i+1, j, 1] = vert_coords[e][1]
-                        lby[i+1, j, 2] = vert_coords[e][2]
-                    elif e == 6:
-                        lbx[i, j+1, 0] = vert_coords[e][0]
-                        lbx[i, j+1, 1] = vert_coords[e][1]
-                        lbx[i, j+1, 2] = vert_coords[e][2]
-                    elif e == 7:
-                        lby[i, j, 0] = vert_coords[e][0]
-                        lby[i, j, 1] = vert_coords[e][1]
-                        lby[i, j, 2] = vert_coords[e][2]
-                    elif e == 8:
-                        zed[i, j, 0] = vert_coords[e][0]
-                        zed[i, j, 1] = vert_coords[e][1]
-                        zed[i, j, 2] = vert_coords[e][2]
-                    elif e == 9:
-                        zed[i+1, j, 0] = vert_coords[e][0]
-                        zed[i+1, j, 1] = vert_coords[e][1]
-                        zed[i+1, j, 2] = vert_coords[e][2]
-                    elif e == 10:
-                        zed[i+1, j+1, 0] = vert_coords[e][0]
-                        zed[i+1, j+1, 1] = vert_coords[e][1]
-                        zed[i+1, j+1, 2] = vert_coords[e][2]
-                    else:
-                        zed[i, j+1, 0] = vert_coords[e][0]
-                        zed[i, j+1, 1] = vert_coords[e][1]
-                        zed[i, j+1, 2] = vert_coords[e][2]
+                    # Cache in face-layer via pointer
+                    fl_p[fl_off] = vert_coords[e][0]
+                    fl_p[fl_off + 1] = vert_coords[e][1]
+                    fl_p[fl_off + 2] = vert_coords[e][2]
 
                 # Emit triangles to STL buffer
                 t_idx = 0
@@ -2218,6 +2162,12 @@ def fused_stl_export(
         memset(&lby[0, 0, 0], 0xFF, px * (py - 1) * 3 * sizeof(float))
         memset(&zed[0, 0, 0], 0xFF, px * py * 3 * sizeof(float))
         lbx = lbx_np; lby = lby_np; zed = zed_np
+        # Update jump table pointers after swap
+        layer_ptrs[0] = &lax[0, 0, 0]
+        layer_ptrs[1] = &lay[0, 0, 0]
+        layer_ptrs[2] = &lbx[0, 0, 0]
+        layer_ptrs[3] = &lby[0, 0, 0]
+        layer_ptrs[4] = &zed[0, 0, 0]
 
         if k + 2 < pz:
             # Compute next convolved Z-slice into slice_b
