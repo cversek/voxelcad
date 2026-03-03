@@ -2150,8 +2150,9 @@ def fused_stl_export(
                     fptr[0] = uy * wz - uz * wy
                     fptr[1] = uz * wx - ux * wz
                     fptr[2] = ux * wy - uy * wx
-                    # Orient normal to align with SDF gradient (outward)
-                    if (fptr[0]*gx + fptr[1]*gy + fptr[2]*gz) < 0.0:
+                    # Orient normal outward: gradient points INWARD (toward
+                    # positive/inside), so flip if normal aligns WITH gradient
+                    if (fptr[0]*gx + fptr[1]*gy + fptr[2]*gz) > 0.0:
                         fptr[0] = -fptr[0]
                         fptr[1] = -fptr[1]
                         fptr[2] = -fptr[2]
