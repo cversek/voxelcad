@@ -1105,6 +1105,133 @@ def compute_sdf_cdt(
 
 
 # ---------------------------------------------------------------------------
+# Fused scale + convolve (replaces CDT + convolve for scaled smoothing path)
+# ---------------------------------------------------------------------------
+
+def fused_scale_convolve(
+    const unsigned char[::1] packed,
+    long long rx, long long ry, long long rz,
+    const signed char[:, :, ::1] kernel,
+    int stride=1,
+    int n_threads=0,
+):
+    """Fused unpack-scale-convolve: packed bits -> smoothed int8 field.
+
+    Replaces compute_sdf_cdt() + convolve_sdf_spatial() for the scaled
+    smoothing fast path. Each packed bit is scaled to {-1, +1}
+    (empty/solid) and convolved with the int8 Butterworth kernel
+    (sum ~256) using int16 accumulation. Accumulator range [-256, +256]
+    maps smoothly to int8 output, producing a wide transition band
+    at the surface for precise MC vertex interpolation.
+
+    No intermediate volumes: bits are unpacked on-the-fly during
+    convolution. Memory: output array only (padded output bytes).
+
+    The output is padded by 1 voxel on each side (matching
+    compute_sdf_cdt convention) so that marching cubes has boundary
+    context.
+
+    Args:
+        packed: F-order packed binary volume (big-endian bitorder)
+        rx, ry, rz: full-resolution grid dimensions
+        kernel: int8 quantized Butterworth kernel, shape (2r+1, 2r+1, 2r+1)
+        stride: subsample factor (1 = full resolution, 2 = half, etc.)
+        n_threads: OpenMP threads (0 = auto-detect)
+
+    Returns:
+        np.ndarray[int8]: smoothed field, C-contiguous.
+            Shape (sx+2, sy+2, sz+2) where s* = ceil(r*/stride).
+            1-voxel padding on each side (padding = -1, empty).
+            Positive inside, negative outside. Zero-crossing at surface.
+    """
+    # Strided output dimensions (same as compute_sdf_cdt)
+    cdef int sx = <int>((rx + stride - 1) // stride)
+    cdef int sy = <int>((ry + stride - 1) // stride)
+    cdef int sz = <int>((rz + stride - 1) // stride)
+    # Add 1-voxel padding per side for MC boundary context
+    cdef int px = sx + 2
+    cdef int py = sy + 2
+    cdef int pz = sz + 2
+
+    cdef int kx = kernel.shape[0]
+    cdef int ky = kernel.shape[1]
+    cdef int kz = kernel.shape[2]
+    cdef int krx = kx // 2
+    cdef int kry = ky // 2
+    cdef int krz = kz // 2
+
+    # Initialize to -1 (empty) so padding border is correct without fill loop
+    out_arr = np.full((px, py, pz), -1, dtype=np.int8)
+    cdef signed char[:, :, ::1] out = out_arr
+
+    cdef int i, j, k, di, dj, dk
+    cdef int si, sj, sk
+    cdef int fi, fj, fk
+    cdef short acc
+    cdef int val
+    cdef long long bit_idx, byte_idx
+    cdef int bit_pos
+    cdef signed char src_val
+    cdef const unsigned char *src = &packed[0]
+    cdef long long rx_ll = rx
+    cdef long long rxy = rx * ry
+    cdef int str = stride
+
+    if n_threads <= 0:
+        n_threads = _get_optimal_threads(px)
+
+    with nogil:
+        # Iterate over padded output grid. Data voxels at [1..sx, 1..sy, 1..sz].
+        # Padding voxels (i=0, i=sx+1, etc.) stay as 0 → filled below.
+        for i in prange(sx, num_threads=n_threads, schedule='static'):
+            for j in range(sy):
+                for k in range(sz):
+                    acc = 0
+                    for di in range(kx):
+                        # Source voxel in strided coords
+                        si = i + di - krx
+                        for dj in range(ky):
+                            sj = j + dj - kry
+                            for dk in range(kz):
+                                sk = k + dk - krz
+                                # Map strided coords to full-res
+                                fi = si * str
+                                fj = sj * str
+                                fk = sk * str
+                                # Out-of-bounds in full-res = empty
+                                if (fi < 0 or fi >= <int>rx or
+                                        fj < 0 or fj >= <int>ry or
+                                        fk < 0 or fk >= <int>rz):
+                                    src_val = -1
+                                else:
+                                    # F-order bit index in packed array
+                                    bit_idx = (
+                                        <long long>fi +
+                                        <long long>fj * rx_ll +
+                                        <long long>fk * rxy)
+                                    byte_idx = bit_idx >> 3
+                                    bit_pos = <int>(bit_idx & 7)
+                                    # big-endian packbits: MSB first
+                                    if (src[byte_idx] >> (7 - bit_pos)) & 1:
+                                        src_val = 1
+                                    else:
+                                        src_val = -1
+                                acc = acc + <short>(
+                                    <short>src_val *
+                                    <short>kernel[di, dj, dk])
+                    # Clip to int8 range
+                    val = <int>acc
+                    if val > 127:
+                        val = 127
+                    elif val < -128:
+                        val = -128
+                    # Write to padded output (+1 offset for padding)
+                    out[i + 1, j + 1, k + 1] = <signed char>val
+
+    return out_arr
+
+
+# ---------------------------------------------------------------------------
 # Int8 spatial convolution (replaces FFT Butterworth for narrow kernels)
 # ---------------------------------------------------------------------------
 

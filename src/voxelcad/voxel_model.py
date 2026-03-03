@@ -244,13 +244,17 @@ class VoxelModel:
 
     def render_surface_mesh(self, isovalue=0.0, lowpass_cutoff=0.25,
                                 cache=True, only_largest_component=False,
-                                target_reduction=0.0, mc_stride=1):
-        """Extract smooth surface mesh using a signed distance field.
+                                target_reduction=0.0, mc_stride=1,
+                                method='auto'):
+        """Extract smooth surface mesh from binary voxel volume.
 
-        Computes a distance transform on both interior and exterior of the
-        binary volume to build a signed distance field (SDF = interior -
-        exterior), applies a Butterworth low-pass filter in the frequency
-        domain to remove voxel staircase artifacts, then runs marching cubes.
+        Two methods available:
+        - 'cdt': CDT signed distance field + Butterworth convolution.
+            Required for non-zero isovalue (offset surfaces).
+        - 'scaled': Fused scale + convolve (no CDT, faster, lower memory).
+            Only supports isovalue=0.0 (zero-crossing). If isovalue != 0.0,
+            falls back to 'cdt' automatically.
+        - 'auto': selects 'cdt' (will switch to 'scaled' in future)
 
         Args:
             isovalue: SDF threshold for isosurface extraction.
@@ -267,6 +271,7 @@ class VoxelModel:
             mc_stride: Subsample factor for SDF computation. stride=2
                 computes distance transform at half resolution (8x fewer
                 voxels). Safe when geometry bandwidth < 0.5/stride.
+            method: 'auto', 'cdt', or 'scaled' (scaled smoothing).
 
         Returns:
             PyVista PolyData surface mesh.
@@ -289,93 +294,136 @@ class VoxelModel:
         # Ensure volume is rendered
         if self.voxel_data is None:
             self.render_volume()
-        # Compute signed distance field via Cython CDT or scipy fallback
-        _t0 = time.time()
-        from voxelcad._kernels import compute_sdf_cdt as _cython_sdf_cdt
-        if _cython_sdf_cdt is not None and self.voxel_data is not None:
+        # Resolve method
+        if method == 'auto':
+            method = 'cdt'
+        if method == 'scaled' and isovalue != 0.0:
+            import warnings
+            warnings.warn(
+                f"Scaled smoothing only supports isovalue=0.0 (got "
+                f"{isovalue}). Falling back to CDT method.",
+                stacklevel=2)
+            method = 'cdt'
+        # --- Scalar field computation (method-dependent) ---
+        # Both paths produce 'scalar_field': int8 array with zero-crossing
+        # at surface boundary, fed to marching cubes below.
+        if method == 'scaled':
+            # Scaled smoothing: fused unpack + scale + convolve (no CDT)
+            _t0 = time.time()
+            from voxelcad._kernels import fused_scale_convolve as _fused_sc
+            if _fused_sc is None:
+                raise RuntimeError(
+                    "Scaled smoothing requires Cython extension. "
+                    "Run: python setup.py build_ext --inplace")
             rx, ry, rz = self.grid.res_vector
-            LOGGER.info(f"\tCython CDT int8 SDF on ({rx},{ry},{rz}) "
-                        f"stride={mc_stride}...")
-            dist = _cython_sdf_cdt(self.voxel_data, rx, ry, rz, mc_stride)
-            # Kernel returns padded SDF; strip for stride=1 compatibility
+            from voxelcad.utils.spectral import compute_butterworth_kernel
+            kern = compute_butterworth_kernel(
+                order=4, cutoff=lowpass_cutoff, radius=3)
+            LOGGER.info(f"\tFused scale+convolve on ({rx},{ry},{rz}) "
+                        f"stride={mc_stride} cutoff={lowpass_cutoff}...")
+            scalar_field = _fused_sc(
+                self.voxel_data, rx, ry, rz, kern['int8'],
+                stride=mc_stride)
+            # Strip padding for stride=1 (matches CDT path convention)
             if mc_stride == 1:
-                dist = dist[1:-1, 1:-1, 1:-1].copy()
-            LOGGER.info(f"\t...Cython CDT completed in "
-                        f"{time.time()-_t0:.1f} s, shape={dist.shape}, "
-                        f"dtype={dist.dtype}")
+                scalar_field = scalar_field[1:-1, 1:-1, 1:-1].copy()
+            LOGGER.info(f"\t...fused kernel completed in "
+                        f"{time.time()-_t0:.1f} s, "
+                        f"shape={scalar_field.shape}, "
+                        f"dtype={scalar_field.dtype}")
         else:
-            try:
-                from scipy.ndimage import distance_transform_cdt
-            except ImportError:
-                raise ImportError(
-                    "render_surface_mesh() requires either Cython CDT "
-                    "kernel (build_ext --inplace) or scipy. "
-                    "Install scipy: pip install scipy")
-            V = self._unpack_volume()
-            if mc_stride > 1:
-                V = V[::mc_stride, ::mc_stride, ::mc_stride].copy()
-                V = np.pad(V, 1, mode='constant', constant_values=False)
-            LOGGER.info(f"\tscipy CDT fallback on {V.shape} volume "
-                        f"(stride={mc_stride})...")
-            dist = (distance_transform_cdt(V, metric='chessboard')
+            # CDT path: distance transform + Butterworth convolution
+            _t0 = time.time()
+            from voxelcad._kernels import compute_sdf_cdt as _cython_sdf_cdt
+            if _cython_sdf_cdt is not None and self.voxel_data is not None:
+                rx, ry, rz = self.grid.res_vector
+                LOGGER.info(f"\tCython CDT int8 SDF on ({rx},{ry},{rz}) "
+                            f"stride={mc_stride}...")
+                scalar_field = _cython_sdf_cdt(
+                    self.voxel_data, rx, ry, rz, mc_stride)
+                if mc_stride == 1:
+                    scalar_field = scalar_field[1:-1, 1:-1, 1:-1].copy()
+                LOGGER.info(f"\t...Cython CDT completed in "
+                            f"{time.time()-_t0:.1f} s, "
+                            f"shape={scalar_field.shape}, "
+                            f"dtype={scalar_field.dtype}")
+            else:
+                try:
+                    from scipy.ndimage import distance_transform_cdt
+                except ImportError:
+                    raise ImportError(
+                        "render_surface_mesh() requires either Cython CDT "
+                        "kernel (build_ext --inplace) or scipy. "
+                        "Install scipy: pip install scipy")
+                V = self._unpack_volume()
+                if mc_stride > 1:
+                    V = V[::mc_stride, ::mc_stride, ::mc_stride].copy()
+                    V = np.pad(V, 1, mode='constant', constant_values=False)
+                LOGGER.info(f"\tscipy CDT fallback on {V.shape} volume "
+                            f"(stride={mc_stride})...")
+                scalar_field = (
+                    distance_transform_cdt(V, metric='chessboard')
                     .astype(np.float32)
                     - distance_transform_cdt(~V, metric='chessboard')
                     .astype(np.float32))
-            del V
-            LOGGER.info(f"\t...scipy CDT completed in "
-                        f"{time.time()-_t0:.1f} s, shape={dist.shape}, "
-                        f"dtype={dist.dtype}")
-        # Butterworth low-pass filter: Cython int8 spatial convolution
-        # (falls back to FFT if Cython unavailable)
-        if lowpass_cutoff > 0:
-            _t0 = time.time()
-            from voxelcad._kernels import convolve_sdf_spatial as _cython_conv
-            if _cython_conv is not None:
-                from voxelcad.utils.spectral import compute_butterworth_kernel
-                LOGGER.info(f"\tCython int8 spatial convolution "
-                            f"(cutoff={lowpass_cutoff})...")
-                kern = compute_butterworth_kernel(
-                    order=4, cutoff=lowpass_cutoff, radius=3)
-                dist = _cython_conv(
-                    np.ascontiguousarray(dist), kern['int8'])
-                LOGGER.info(f"\t...filtering completed in "
-                            f"{time.time()-_t0:.1f} s")
-            else:
-                LOGGER.info(f"\tFFT low-pass filter "
-                            f"(cutoff={lowpass_cutoff})...")
-                from scipy.fft import rfftn, irfftn, fftfreq, rfftfreq
-                rx, ry, rz = dist.shape
-                fx = fftfreq(rx).astype(np.float32)
-                fy = fftfreq(ry).astype(np.float32)
-                fz_sq = (rfftfreq(rz).astype(np.float32))**2
-                D_fft = rfftn(dist.astype(np.float32))
-                del dist
-                cutoff_inv8 = np.float32(1.0 / lowpass_cutoff**8)
-                for i in range(rx):
-                    fx_sq = fx[i]**2
-                    fxy_sq = fx_sq + fy**2
-                    freq_mag_sq = fxy_sq[:, None] + fz_sq[None, :]
-                    freq_mag_4 = freq_mag_sq * freq_mag_sq
-                    H_slice = (1.0 / (1.0 + freq_mag_4 * freq_mag_4
-                                      * cutoff_inv8)).astype(np.float32)
-                    D_fft[i, :, :] *= H_slice
-                del H_slice, fxy_sq, freq_mag_sq, freq_mag_4
-                dist = irfftn(D_fft, s=(rx, ry, rz))
-                del D_fft
-                LOGGER.info(f"\t...filtering completed in "
-                            f"{time.time()-_t0:.1f} s")
-        # Marching cubes: Cython streaming MC or VTK contour fallback
+                del V
+                LOGGER.info(f"\t...scipy CDT completed in "
+                            f"{time.time()-_t0:.1f} s, "
+                            f"shape={scalar_field.shape}, "
+                            f"dtype={scalar_field.dtype}")
+            # Butterworth low-pass filter (CDT path only; scaled path
+            # includes convolution in the fused kernel)
+            if lowpass_cutoff > 0:
+                _t0 = time.time()
+                from voxelcad._kernels import (
+                    convolve_sdf_spatial as _cython_conv)
+                if _cython_conv is not None:
+                    from voxelcad.utils.spectral import (
+                        compute_butterworth_kernel)
+                    LOGGER.info(f"\tCython int8 spatial convolution "
+                                f"(cutoff={lowpass_cutoff})...")
+                    kern = compute_butterworth_kernel(
+                        order=4, cutoff=lowpass_cutoff, radius=3)
+                    scalar_field = _cython_conv(
+                        np.ascontiguousarray(scalar_field), kern['int8'])
+                    LOGGER.info(f"\t...filtering completed in "
+                                f"{time.time()-_t0:.1f} s")
+                else:
+                    LOGGER.info(f"\tFFT low-pass filter "
+                                f"(cutoff={lowpass_cutoff})...")
+                    from scipy.fft import rfftn, irfftn, fftfreq, rfftfreq
+                    rx, ry, rz = scalar_field.shape
+                    fx = fftfreq(rx).astype(np.float32)
+                    fy = fftfreq(ry).astype(np.float32)
+                    fz_sq = (rfftfreq(rz).astype(np.float32))**2
+                    D_fft = rfftn(scalar_field.astype(np.float32))
+                    del scalar_field
+                    cutoff_inv8 = np.float32(1.0 / lowpass_cutoff**8)
+                    for i in range(rx):
+                        fx_sq = fx[i]**2
+                        fxy_sq = fx_sq + fy**2
+                        freq_mag_sq = fxy_sq[:, None] + fz_sq[None, :]
+                        freq_mag_4 = freq_mag_sq * freq_mag_sq
+                        H_slice = (1.0 / (1.0 + freq_mag_4 * freq_mag_4
+                                          * cutoff_inv8)).astype(np.float32)
+                        D_fft[i, :, :] *= H_slice
+                    del H_slice, fxy_sq, freq_mag_sq, freq_mag_4
+                    scalar_field = irfftn(D_fft, s=(rx, ry, rz))
+                    del D_fft
+                    LOGGER.info(f"\t...filtering completed in "
+                                f"{time.time()-_t0:.1f} s")
+        # --- Marching cubes (shared by both paths) ---
         vsv = self.grid.voxel_size_vector * mc_stride
         _t0 = time.time()
         from voxelcad._kernels import streaming_mc_mesh as _cython_mc
         if _cython_mc is not None:
             LOGGER.info(f"\tCython streaming MC (isovalue={isovalue})...")
-            dist_c = np.ascontiguousarray(dist)
-            del dist
+            sf_c = np.ascontiguousarray(scalar_field)
+            del scalar_field
             verts, faces = _cython_mc(
-                dist_c, vsv[0], vsv[1], vsv[2],
+                sf_c, vsv[0], vsv[1], vsv[2],
                 isovalue=isovalue)
-            del dist_c
+            del sf_c
             # Deduplicate vertices (streaming MC emits 3 per triangle).
             # Quantize to grid resolution to merge float rounding diffs.
             if verts.shape[0] > 0:
@@ -397,13 +445,13 @@ class VoxelModel:
                 pv_surf = pv.PolyData()
         else:
             LOGGER.info(f"\tVTK contour (isovalue={isovalue})...")
-            rv = np.array(dist.shape)
+            rv = np.array(scalar_field.shape)
             ugrid = UniformGrid()
             ugrid.dimensions = rv
             ugrid.spacing = vsv
-            ugrid.point_data['dist'] = dist.ravel(order='F')
-            del dist
-            pv_surf = ugrid.contour([isovalue], scalars='dist')
+            ugrid.point_data['scalar_field'] = scalar_field.ravel(order='F')
+            del scalar_field
+            pv_surf = ugrid.contour([isovalue], scalars='scalar_field')
             del ugrid
         LOGGER.info(f"\t...MC completed in {time.time()-_t0:.1f} s "
                     f"({pv_surf.n_cells} tris)")

@@ -23,6 +23,7 @@ evaluate_and_pack_hyperwiggly_gyroid = None
 resample_and_pack = None
 compute_sdf_cdt = None
 convolve_sdf_spatial = None
+fused_scale_convolve = None
 streaming_mc_mesh = None
 streaming_mc_stl = None
 
@@ -37,6 +38,7 @@ try:
         resample_and_pack,
         compute_sdf_cdt,
         convolve_sdf_spatial,
+        fused_scale_convolve,
         streaming_mc_mesh,
         streaming_mc_stl,
         _detect_p_cores,
@@ -57,6 +59,7 @@ __all__ = [
     'resample_and_pack',
     'compute_sdf_cdt',
     'convolve_sdf_spatial',
+    'fused_scale_convolve',
     'streaming_mc_mesh',
     'streaming_mc_stl',
 ]
