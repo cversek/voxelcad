@@ -1983,9 +1983,16 @@ def fused_stl_export(
     cdef FILE *fp = fopen(fn_bytes, "wb")
     if fp == NULL:
         raise IOError(f"Cannot open file: {filename}")
-    # Write STL header (80 zero bytes) + placeholder triangle count (4 bytes)
+    # Write STL header + placeholder triangle count (4 bytes)
+    # Use VTK-style header — some viewers (macOS Preview) may use it
     cdef unsigned char c_header[84]
     memset(c_header, 0, 84)
+    cdef const char *hdr_str = b"VoxelCAD fused STL export"
+    cdef int hdr_len = 25
+    memset(c_header, 0x20, 80)  # space-fill
+    cdef int hi
+    for hi in range(hdr_len):
+        c_header[hi] = <unsigned char>hdr_str[hi]
     fwrite(c_header, 1, 84, fp)
 
     # --- Compute initial slice_b (z=1) ---
