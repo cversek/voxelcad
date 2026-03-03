@@ -1954,8 +1954,9 @@ def fused_stl_export(
     cdef int v0_idx, v1_idx
     cdef int tri_count = 0
     cdef float vx, vy, vz
-    # Cross-product normal computation
+    # Cross-product normal computation + gradient-based orientation
     cdef float ux, uy, uz, wx, wy, wz, nn
+    cdef float gx, gy, gz  # SDF gradient at cell center
 
     # Face-layer jump table: pointers + strides for indexed edge dispatch
     cdef float *layer_ptrs[5]
@@ -2115,6 +2116,21 @@ def fused_stl_export(
                     fl_p[fl_off + 1] = vert_coords[e][1]
                     fl_p[fl_off + 2] = vert_coords[e][2]
 
+                # SDF gradient at cell center (from 8 corner values)
+                # Points outward (from positive/inside toward negative/outside)
+                gx = ((corner_vals[1] - corner_vals[0])
+                      + (corner_vals[2] - corner_vals[3])
+                      + (corner_vals[5] - corner_vals[4])
+                      + (corner_vals[6] - corner_vals[7])) * 0.25
+                gy = ((corner_vals[3] - corner_vals[0])
+                      + (corner_vals[2] - corner_vals[1])
+                      + (corner_vals[7] - corner_vals[4])
+                      + (corner_vals[6] - corner_vals[5])) * 0.25
+                gz = ((corner_vals[4] - corner_vals[0])
+                      + (corner_vals[5] - corner_vals[1])
+                      + (corner_vals[6] - corner_vals[2])
+                      + (corner_vals[7] - corner_vals[3])) * 0.25
+
                 # Emit triangles to STL buffer
                 t_idx = 0
                 while tri_tbl[cube_idx, t_idx] != -1:
@@ -2124,16 +2140,21 @@ def fused_stl_export(
 
                     buf_off = buf_count * 50
                     fptr = <float*>(&stl_buf[buf_off])
-                    # Compute face normal via cross product (v1-v0) x (v2-v0)
+                    # Cross product (v1-v0) x (v2-v0)
                     ux = vert_coords[ei1][0] - vert_coords[ei0][0]
                     uy = vert_coords[ei1][1] - vert_coords[ei0][1]
                     uz = vert_coords[ei1][2] - vert_coords[ei0][2]
                     wx = vert_coords[ei2][0] - vert_coords[ei0][0]
                     wy = vert_coords[ei2][1] - vert_coords[ei0][1]
                     wz = vert_coords[ei2][2] - vert_coords[ei0][2]
-                    fptr[0] = -(uy * wz - uz * wy)
-                    fptr[1] = -(uz * wx - ux * wz)
-                    fptr[2] = -(ux * wy - uy * wx)
+                    fptr[0] = uy * wz - uz * wy
+                    fptr[1] = uz * wx - ux * wz
+                    fptr[2] = ux * wy - uy * wx
+                    # Orient normal to align with SDF gradient (outward)
+                    if (fptr[0]*gx + fptr[1]*gy + fptr[2]*gz) < 0.0:
+                        fptr[0] = -fptr[0]
+                        fptr[1] = -fptr[1]
+                        fptr[2] = -fptr[2]
                     # Normalize
                     nn = sqrt(fptr[0]*fptr[0] + fptr[1]*fptr[1] + fptr[2]*fptr[2])
                     if nn > 0.0:
