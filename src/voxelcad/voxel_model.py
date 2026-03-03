@@ -243,6 +243,7 @@ class VoxelModel:
         return pv_vol
 
     def render_surface_mesh(self, isovalue=0.0, lowpass_cutoff=0.25,
+                                lowpass_order=4,
                                 cache=True, only_largest_component=False,
                                 target_reduction=0.0, mc_stride=1,
                                 method='auto'):
@@ -251,10 +252,10 @@ class VoxelModel:
         Two methods available:
         - 'cdt': CDT signed distance field + Butterworth convolution.
             Required for non-zero isovalue (offset surfaces).
-        - 'scaled': Fused scale + convolve (no CDT, faster, lower memory).
+        - 'fast_smooth': Fused scale + convolve (no CDT, faster, lower memory).
             Only supports isovalue=0.0 (zero-crossing). If isovalue != 0.0,
             falls back to 'cdt' automatically.
-        - 'auto': selects 'cdt' (will switch to 'scaled' in future)
+        - 'auto': selects 'cdt' (will switch to 'fast_smooth' in future)
 
         Args:
             isovalue: SDF threshold for isosurface extraction.
@@ -262,6 +263,8 @@ class VoxelModel:
             lowpass_cutoff: Cutoff frequency as fraction of Nyquist
                 (0.0-0.5 cycles/voxel).  Removes staircase artifacts
                 above this frequency.  0 disables filtering.
+            lowpass_order: Butterworth filter order (default 4).
+                Higher = sharper cutoff, more ringing near thin features.
             cache: If True, cache the result in self.pv_surf.
             only_largest_component: If True, keep only the largest
                 connected component.
@@ -271,7 +274,7 @@ class VoxelModel:
             mc_stride: Subsample factor for SDF computation. stride=2
                 computes distance transform at half resolution (8x fewer
                 voxels). Safe when geometry bandwidth < 0.5/stride.
-            method: 'auto', 'cdt', or 'scaled' (scaled smoothing).
+            method: 'auto', 'cdt', or 'fast_smooth'.
 
         Returns:
             PyVista PolyData surface mesh.
@@ -294,10 +297,14 @@ class VoxelModel:
         # Ensure volume is rendered
         if self.voxel_data is None:
             self.render_volume()
-        # Resolve method
+        # Validate method
+        if method not in ('auto', 'cdt', 'fast_smooth'):
+            raise ValueError(
+                f"Unknown method {method!r}. "
+                f"Use 'auto', 'cdt', or 'fast_smooth'.")
         if method == 'auto':
-            method = 'cdt'
-        if method == 'scaled' and isovalue != 0.0:
+            method = 'cdt'  # will switch to 'fast_smooth' in future
+        if method == 'fast_smooth' and isovalue != 0.0:
             import warnings
             warnings.warn(
                 f"Scaled smoothing only supports isovalue=0.0 (got "
@@ -307,7 +314,7 @@ class VoxelModel:
         # --- Scalar field computation (method-dependent) ---
         # Both paths produce 'scalar_field': int8 array with zero-crossing
         # at surface boundary, fed to marching cubes below.
-        if method == 'scaled':
+        if method == 'fast_smooth':
             # Scaled smoothing: fused unpack + scale + convolve (no CDT)
             _t0 = time.time()
             from voxelcad._kernels import fused_scale_convolve as _fused_sc
@@ -318,7 +325,7 @@ class VoxelModel:
             rx, ry, rz = self.grid.res_vector
             from voxelcad.utils.spectral import compute_butterworth_kernel
             kern = compute_butterworth_kernel(
-                order=4, cutoff=lowpass_cutoff, radius=3)
+                order=lowpass_order, cutoff=lowpass_cutoff, radius=3)
             LOGGER.info(f"\tFused scale+convolve on ({rx},{ry},{rz}) "
                         f"stride={mc_stride} cutoff={lowpass_cutoff}...")
             scalar_field = _fused_sc(
