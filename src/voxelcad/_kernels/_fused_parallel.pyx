@@ -2131,9 +2131,9 @@ def fused_stl_export(
                     wx = vert_coords[ei2][0] - vert_coords[ei0][0]
                     wy = vert_coords[ei2][1] - vert_coords[ei0][1]
                     wz = vert_coords[ei2][2] - vert_coords[ei0][2]
-                    fptr[0] = uy * wz - uz * wy
-                    fptr[1] = uz * wx - ux * wz
-                    fptr[2] = ux * wy - uy * wx
+                    fptr[0] = -(uy * wz - uz * wy)
+                    fptr[1] = -(uz * wx - ux * wz)
+                    fptr[2] = -(ux * wy - uy * wx)
                     # Normalize
                     nn = sqrt(fptr[0]*fptr[0] + fptr[1]*fptr[1] + fptr[2]*fptr[2])
                     if nn > 0.0:
