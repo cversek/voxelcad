@@ -1954,8 +1954,9 @@ def fused_stl_export(
     cdef int v0_idx, v1_idx
     cdef int tri_count = 0
     cdef float vx, vy, vz
-    # Cross-product normal computation
+    # Cross-product normal computation + gradient-based orientation
     cdef float ux, uy, uz, wx, wy, wz, nn
+    cdef float gx, gy, gz  # SDF gradient at cell center
 
     # Face-layer jump table: pointers + strides for indexed edge dispatch
     cdef float *layer_ptrs[5]
@@ -2064,17 +2065,15 @@ def fused_stl_export(
                 corner_vals[6] = <float>slice_b[i + 1, j + 1]
                 corner_vals[7] = <float>slice_b[i, j + 1]
 
-                # Flag INSIDE voxels (val >= isovalue) to match MC table
-                # winding convention. Standard tables expect flagged=inside.
                 cube_idx = 0
-                if corner_vals[0] >= isovalue: cube_idx |= 1
-                if corner_vals[1] >= isovalue: cube_idx |= 2
-                if corner_vals[2] >= isovalue: cube_idx |= 4
-                if corner_vals[3] >= isovalue: cube_idx |= 8
-                if corner_vals[4] >= isovalue: cube_idx |= 16
-                if corner_vals[5] >= isovalue: cube_idx |= 32
-                if corner_vals[6] >= isovalue: cube_idx |= 64
-                if corner_vals[7] >= isovalue: cube_idx |= 128
+                if corner_vals[0] < isovalue: cube_idx |= 1
+                if corner_vals[1] < isovalue: cube_idx |= 2
+                if corner_vals[2] < isovalue: cube_idx |= 4
+                if corner_vals[3] < isovalue: cube_idx |= 8
+                if corner_vals[4] < isovalue: cube_idx |= 16
+                if corner_vals[5] < isovalue: cube_idx |= 32
+                if corner_vals[6] < isovalue: cube_idx |= 64
+                if corner_vals[7] < isovalue: cube_idx |= 128
 
                 edges_mask = edge_tbl[cube_idx]
                 if edges_mask == 0:
@@ -2124,6 +2123,21 @@ def fused_stl_export(
                     fl_p[fl_off + 1] = vert_coords[e][1]
                     fl_p[fl_off + 2] = vert_coords[e][2]
 
+                # SDF gradient at cell center (from 8 corner values)
+                # Points outward (from positive/inside toward negative/outside)
+                gx = ((corner_vals[1] - corner_vals[0])
+                      + (corner_vals[2] - corner_vals[3])
+                      + (corner_vals[5] - corner_vals[4])
+                      + (corner_vals[6] - corner_vals[7])) * 0.25
+                gy = ((corner_vals[3] - corner_vals[0])
+                      + (corner_vals[2] - corner_vals[1])
+                      + (corner_vals[7] - corner_vals[4])
+                      + (corner_vals[6] - corner_vals[5])) * 0.25
+                gz = ((corner_vals[4] - corner_vals[0])
+                      + (corner_vals[5] - corner_vals[1])
+                      + (corner_vals[6] - corner_vals[2])
+                      + (corner_vals[7] - corner_vals[3])) * 0.25
+
                 # Emit triangles to STL buffer
                 t_idx = 0
                 while tri_tbl[cube_idx, t_idx] != -1:
@@ -2143,6 +2157,14 @@ def fused_stl_export(
                     fptr[0] = uy * wz - uz * wy
                     fptr[1] = uz * wx - ux * wz
                     fptr[2] = ux * wy - uy * wx
+                    # Orient normal outward: gradient points INWARD (toward
+                    # positive/inside), so flip if normal aligns WITH gradient
+                    if (fptr[0]*gx + fptr[1]*gy + fptr[2]*gz) > 0.0:
+                        fptr[0] = -fptr[0]
+                        fptr[1] = -fptr[1]
+                        fptr[2] = -fptr[2]
+                        # Swap winding order so viewers derive correct orientation
+                        ei1, ei2 = ei2, ei1
                     # Normalize
                     nn = sqrt(fptr[0]*fptr[0] + fptr[1]*fptr[1] + fptr[2]*fptr[2])
                     if nn > 0.0:
