@@ -2163,6 +2163,8 @@ def fused_stl_export(
                         fptr[0] = -fptr[0]
                         fptr[1] = -fptr[1]
                         fptr[2] = -fptr[2]
+                        # Swap winding order so viewers derive correct orientation
+                        ei1, ei2 = ei2, ei1
                     # Normalize
                     nn = sqrt(fptr[0]*fptr[0] + fptr[1]*fptr[1] + fptr[2]*fptr[2])
                     if nn > 0.0:
