@@ -2801,14 +2801,16 @@ def fused_stl_export(
         slice_b = slice_b_np
 
         # Swap face layers: top becomes bottom, reset top + z-edges
+        # CRITICAL: update ALL memoryviews BEFORE memset to avoid
+        # memsetting the wrong arrays (stale views alias new lax/lay).
         lax_np, lbx_np = lbx_np, lax_np
         lay_np, lby_np = lby_np, lay_np
         lax = lax_np; lay = lay_np
-        # Reset face layers with NaN via 0xFF memset (all-1s = quiet NaN)
+        lbx = lbx_np; lby = lby_np; zed = zed_np
+        # Reset new top layers + z-edges with NaN via 0xFF memset
         memset(&lbx[0, 0, 0], 0xFF, (px - 1) * py * 3 * sizeof(float))
         memset(&lby[0, 0, 0], 0xFF, px * (py - 1) * 3 * sizeof(float))
         memset(&zed[0, 0, 0], 0xFF, px * py * 3 * sizeof(float))
-        lbx = lbx_np; lby = lby_np; zed = zed_np
         # Update jump table pointers after swap
         layer_ptrs[0] = &lax[0, 0, 0]
         layer_ptrs[1] = &lay[0, 0, 0]

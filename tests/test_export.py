@@ -132,12 +132,14 @@ class TestWindingConsistency:
         return normals, centroids
 
     def test_sphere_normals_point_outward(self, sphere, tmp_path):
-        """For a centered sphere, normals should point away from origin."""
+        """For a sphere, normals should point away from mesh center."""
         fname = str(tmp_path / "winding.stl")
         sphere.export(fname, method='fast_smooth')
         normals, centroids = self._read_stl_normals_and_verts(fname)
-        # Dot product of normal with centroid vector (from origin)
-        dots = np.sum(normals * centroids, axis=1)
+        # Use mesh center — sphere grid origin is not at (0,0,0)
+        mesh_center = centroids.mean(axis=0)
+        radial = centroids - mesh_center
+        dots = np.sum(normals * radial, axis=1)
         # All should be positive (outward-facing)
         outward_pct = np.sum(dots > 0) / len(dots) * 100
         assert outward_pct > 99.0, (
