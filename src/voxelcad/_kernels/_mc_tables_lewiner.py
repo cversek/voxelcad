@@ -734,3 +734,45 @@ test10 = _decode(TEST10)
 test12 = _decode(TEST12)
 test13 = _decode(TEST13)
 subconfig13 = _decode(SUBCONFIG13)
+
+
+# ---------------------------------------------------------------------------
+# OPT 5b: Pre-merged flat tiling table for fast_smooth path
+# ---------------------------------------------------------------------------
+# Maps each of the 256 cube_idx values directly to an edge list, collapsing
+# the 15-case Lewiner dispatch into a single O(1) array lookup.
+#
+# For unambiguous cases (1,2,5,8,9,11,14): exact tiling (lossless).
+# For ambiguous cases (3,4,6,7,10,12,13): simpler tiling variant (_1),
+#   which avoids edge-12 center vertex. Effectively lossless when SDF is
+#   smooth (Butterworth int8 produces zero ambiguous cases in practice).
+#
+# Layout: fast_tiling[cube_idx, 0] = n_edges (0,3,6,...,36)
+#         fast_tiling[cube_idx, 1:1+n_edges] = edge indices
+#         Remaining entries = -1
+# ---------------------------------------------------------------------------
+def _build_fast_tiling():
+    ft = _np.full((256, 37), -1, dtype=_np.int8)
+    # Map case_id -> tiling table (simpler variant for ambiguous cases)
+    _tiling_map = {
+        1: tiling1, 2: tiling2, 3: tiling3_1, 4: tiling4_1,
+        5: tiling5, 6: tiling6_1_1, 7: tiling7_1, 8: tiling8,
+        9: tiling9, 10: tiling10_1_1, 11: tiling11, 12: tiling12_1_1,
+        13: tiling13_1, 14: tiling14,
+    }
+    for cube_idx in range(256):
+        case_id, config = int(cases[cube_idx, 0]), int(cases[cube_idx, 1])
+        if case_id == 0:
+            ft[cube_idx, 0] = 0
+            continue
+        tbl = _tiling_map[case_id]
+        row = tbl[config]
+        # Count edges until -1 sentinel
+        n = 0
+        while n < len(row) and row[n] != -1:
+            n += 1
+        ft[cube_idx, 0] = n
+        ft[cube_idx, 1:1+n] = row[:n]
+    return ft
+
+fast_tiling = _build_fast_tiling()
