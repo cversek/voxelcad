@@ -6,7 +6,7 @@ import tempfile
 import numpy as np
 import pytest
 
-from voxelcad import Sphere
+from voxelcad import Sphere, Cube, Cylinder, GyroidCube
 from voxelcad._kernels import fused_stl_export
 
 
@@ -172,6 +172,75 @@ class TestWindingConsistency:
         pct = agree / n_tri * 100
         assert pct > 99.0, (
             f"Only {pct:.1f}% triangles have consistent winding (expect >99%)")
+
+
+def _read_stl_fast(path):
+    """Read binary STL efficiently, return (normals, v0, v1, v2) as float32 arrays."""
+    with open(path, 'rb') as f:
+        f.read(80)
+        n_tris = struct.unpack('<I', f.read(4))[0]
+        raw = np.frombuffer(f.read(n_tris * 50), dtype=np.uint8).reshape(n_tris, 50)
+        fl = np.frombuffer(raw[:, :48].tobytes(), dtype='<f4').reshape(n_tris, 12)
+    return fl[:, 0:3], fl[:, 3:6], fl[:, 6:9], fl[:, 9:12]
+
+
+def _signed_volume(v0, v1, v2):
+    """Signed volume of closed mesh via divergence theorem."""
+    return np.sum(v0 * np.cross(v1, v2)) / 6.0
+
+
+def _radial_outward_pct(path):
+    """Fraction of normals pointing away from mesh center (for convex shapes)."""
+    normals, v0, v1, v2 = _read_stl_fast(path)
+    centroids = (v0 + v1 + v2) / 3.0
+    center = centroids.mean(axis=0)
+    dots = np.sum(normals * (centroids - center), axis=1)
+    return np.sum(dots > 0) / len(dots) * 100
+
+
+@pytest.mark.skipif(fused_stl_export is None,
+                    reason="fused kernel not compiled")
+class TestWindingAllGeometries:
+    """Verify winding correctness across all primitives and CSG operations."""
+
+    VS = 10.0 / 48  # ~48^3 resolution for fast tests
+
+    @pytest.mark.parametrize("model_fn,name", [
+        (lambda vs: Sphere(r=5, voxel_size=vs), "Sphere"),
+        (lambda vs: Cube(size=8, voxel_size=vs), "Cube"),
+        (lambda vs: Cylinder(h=8, r=3, voxel_size=vs), "Cylinder"),
+    ])
+    def test_convex_radial_outward(self, model_fn, name, tmp_path):
+        """Convex primitives: all normals should point away from mesh center."""
+        m = model_fn(self.VS)
+        fname = str(tmp_path / f"{name}.stl")
+        m.export(fname, method='fast_smooth')
+        pct = _radial_outward_pct(fname)
+        assert pct > 99.0, f"{name}: only {pct:.1f}% outward (expect >99%)"
+
+    @pytest.mark.parametrize("model_fn,name", [
+        (lambda vs: GyroidCube(size=8, voxel_size=vs), "GyroidCube"),
+        (lambda vs: Sphere(r=5, voxel_size=vs) | Cube(size=8, voxel_size=vs), "union"),
+        (lambda vs: Sphere(r=6, voxel_size=vs) & Cube(size=8, center=True, voxel_size=vs), "intersect"),
+        (lambda vs: Cube(size=10, center=True, voxel_size=vs) - Sphere(r=4, voxel_size=vs), "difference"),
+        (lambda vs: Sphere(r=5, voxel_size=vs) ^ Cube(size=7, center=True, voxel_size=vs), "xor"),
+    ])
+    def test_signed_volume_positive(self, model_fn, name, tmp_path):
+        """All geometries: signed volume must be positive (outward normals)."""
+        m = model_fn(self.VS)
+        fname = str(tmp_path / f"{name}.stl")
+        m.export(fname, method='fast_smooth')
+        _, v0, v1, v2 = _read_stl_fast(fname)
+        vol = _signed_volume(v0, v1, v2)
+        assert vol > 0, f"{name}: signed volume {vol:.1f} <= 0 (expect positive)"
+
+    def test_stride2_sphere_outward(self, tmp_path):
+        """Stride=2 should also produce correct winding."""
+        s = Sphere(r=5, voxel_size=self.VS)
+        fname = str(tmp_path / "sphere_s2.stl")
+        s.export(fname, method='fast_smooth', mc_stride=2)
+        pct = _radial_outward_pct(fname)
+        assert pct > 99.0, f"Stride=2: only {pct:.1f}% outward"
 
 
 @pytest.mark.skipif(fused_stl_export is None,
