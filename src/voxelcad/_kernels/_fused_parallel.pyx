@@ -1764,7 +1764,9 @@ def sweep_mc_mesh(
                 vals[6] = <float>sdf[i+1, j+1, k+1]
                 vals[7] = <float>sdf[i, j+1, k+1]
 
-                # Lewiner convention: val > isovalue → bit set
+                # Lewiner convention: val > isovalue → bit set (inside).
+                # Tables produce inward normals; emission swaps e1/e2
+                # to get outward normals.
                 cube_idx = 0
                 if vals[0] > isovalue: cube_idx |= 1
                 if vals[1] > isovalue: cube_idx |= 2
@@ -2034,7 +2036,8 @@ def sweep_mc_mesh(
                     edge_vids[12] = n_verts
                     n_verts += 1
 
-                # Emit triangles from edge_buf (Lewiner guarantees correct winding)
+                # Emit triangles: swap indices 1/2 to reverse Lewiner's inward
+                # winding to outward normals.
                 t_idx = 0
                 while t_idx < n_edges:
                     if n_faces >= faces_np.shape[0]:
@@ -2043,8 +2046,8 @@ def sweep_mc_mesh(
                         faces = faces_np
 
                     faces[n_faces, 0] = edge_vids[edge_buf[t_idx]]
-                    faces[n_faces, 1] = edge_vids[edge_buf[t_idx + 1]]
-                    faces[n_faces, 2] = edge_vids[edge_buf[t_idx + 2]]
+                    faces[n_faces, 1] = edge_vids[edge_buf[t_idx + 2]]
+                    faces[n_faces, 2] = edge_vids[edge_buf[t_idx + 1]]
                     n_faces += 1
                     t_idx += 3
 
@@ -2509,7 +2512,9 @@ def fused_stl_export(
                 corner_vals[6] = <float>slice_b[i + 1, j + 1]
                 corner_vals[7] = <float>slice_b[i, j + 1]
 
-                # Lewiner convention: val > isovalue → bit set
+                # Lewiner convention: val > isovalue → bit set (inside).
+                # Tables produce inward normals; emission swaps e1/e2
+                # to get outward normals.
                 cube_idx = 0
                 if corner_vals[0] > isovalue: cube_idx |= 1
                 if corner_vals[1] > isovalue: cube_idx |= 2
@@ -2740,16 +2745,17 @@ def fused_stl_export(
                         vert_coords[12][1] /= wsum
                         vert_coords[12][2] /= wsum
 
-                # Emit triangles from edge_buf (Lewiner guarantees correct winding)
+                # Emit triangles: swap ei1/ei2 to reverse Lewiner's inward
+                # winding to outward normals.
                 t_idx = 0
                 while t_idx < n_edges:
                     ei0 = edge_buf[t_idx]
-                    ei1 = edge_buf[t_idx + 1]
-                    ei2 = edge_buf[t_idx + 2]
+                    ei1 = edge_buf[t_idx + 2]   # swapped
+                    ei2 = edge_buf[t_idx + 1]   # swapped
 
                     buf_off = buf_count * 50
                     fptr = <float*>(&stl_buf[buf_off])
-                    # Cross product (v1-v0) x (v2-v0)
+                    # Cross product (v1-v0) x (v2-v0) — outward after swap
                     ux = vert_coords[ei1][0] - vert_coords[ei0][0]
                     uy = vert_coords[ei1][1] - vert_coords[ei0][1]
                     uz = vert_coords[ei1][2] - vert_coords[ei0][2]
@@ -2759,7 +2765,7 @@ def fused_stl_export(
                     fptr[0] = uy * wz - uz * wy
                     fptr[1] = uz * wx - ux * wz
                     fptr[2] = ux * wy - uy * wx
-                    # Normalize (no gradient flip — Lewiner winding is correct)
+                    # Normalize
                     nn = sqrt(fptr[0]*fptr[0] + fptr[1]*fptr[1] + fptr[2]*fptr[2])
                     if nn > 0.0:
                         fptr[0] = fptr[0] / nn
