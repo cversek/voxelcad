@@ -2501,7 +2501,10 @@ def fused_stl_export(
     # --- Main Z-sweep: MC on slice pairs + STL write ---
     for k in range(pz - 1):
         # MC on slice_a(z=k), slice_b(z=k+1)
-        for j in range(py - 1):
+        # All operations below are pure C: typed memoryviews, C pointers,
+        # libc fwrite/sqrt. nogil enables pipeline parallelism with conv.
+        with nogil:
+          for j in range(py - 1):
             for i in range(px - 1):
                 corner_vals[0] = <float>slice_a[i, j]
                 corner_vals[1] = <float>slice_a[i + 1, j]
