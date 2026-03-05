@@ -112,6 +112,68 @@ class TestExportFileExtension:
 
 @pytest.mark.skipif(fused_stl_export is None,
                     reason="fused kernel not compiled")
+class TestWindingConsistency:
+    """Verify Lewiner MC produces consistent outward-facing normals."""
+
+    def _read_stl_normals_and_verts(self, path):
+        """Read all triangle normals and vertices from binary STL."""
+        with open(path, 'rb') as f:
+            f.seek(80)
+            n_tri = struct.unpack('<I', f.read(4))[0]
+            normals = np.empty((n_tri, 3), dtype=np.float32)
+            centroids = np.empty((n_tri, 3), dtype=np.float32)
+            for i in range(n_tri):
+                data = struct.unpack('<12fH', f.read(50))
+                normals[i] = data[0:3]
+                v0 = np.array(data[3:6])
+                v1 = np.array(data[6:9])
+                v2 = np.array(data[9:12])
+                centroids[i] = (v0 + v1 + v2) / 3.0
+        return normals, centroids
+
+    def test_sphere_normals_point_outward(self, sphere, tmp_path):
+        """For a centered sphere, normals should point away from origin."""
+        fname = str(tmp_path / "winding.stl")
+        sphere.export(fname, method='fast_smooth')
+        normals, centroids = self._read_stl_normals_and_verts(fname)
+        # Dot product of normal with centroid vector (from origin)
+        dots = np.sum(normals * centroids, axis=1)
+        # All should be positive (outward-facing)
+        outward_pct = np.sum(dots > 0) / len(dots) * 100
+        assert outward_pct > 99.0, (
+            f"Only {outward_pct:.1f}% normals point outward (expect >99%)")
+
+    def test_sphere_normals_consistent_winding(self, sphere, tmp_path):
+        """Cross-product normal should match stored STL normal direction."""
+        fname = str(tmp_path / "winding2.stl")
+        sphere.export(fname, method='fast_smooth')
+        with open(fname, 'rb') as f:
+            f.seek(80)
+            n_tri = struct.unpack('<I', f.read(4))[0]
+            agree = 0
+            for _ in range(n_tri):
+                data = struct.unpack('<12fH', f.read(50))
+                n_stl = np.array(data[0:3])
+                v0 = np.array(data[3:6])
+                v1 = np.array(data[6:9])
+                v2 = np.array(data[9:12])
+                # Cross product from vertex winding
+                cp = np.cross(v1 - v0, v2 - v0)
+                cp_len = np.linalg.norm(cp)
+                if cp_len > 0:
+                    cp /= cp_len
+                n_len = np.linalg.norm(n_stl)
+                if n_len > 0:
+                    n_stl /= n_len
+                if np.dot(cp, n_stl) > 0.9:
+                    agree += 1
+        pct = agree / n_tri * 100
+        assert pct > 99.0, (
+            f"Only {pct:.1f}% triangles have consistent winding (expect >99%)")
+
+
+@pytest.mark.skipif(fused_stl_export is None,
+                    reason="fused kernel not compiled")
 class TestFusedVsFallbackConsistency:
     """Verify fused and fallback paths produce comparable results."""
 
