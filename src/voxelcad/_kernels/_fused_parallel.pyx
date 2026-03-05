@@ -1829,6 +1829,171 @@ def sweep_mc_mesh(
     return verts_np[:n_verts].copy(), faces_np[:n_faces].copy()
 
 
+# ---------------------------------------------------------------------------
+# Lewiner MC helpers: topologically correct marching cubes dispatch
+# Reference: Lewiner et al. 2003; ported from scikit-image implementation.
+# ---------------------------------------------------------------------------
+
+DEF LEW_EPS = 1e-12
+
+cdef inline int _lew_test_face(float *v, int face) noexcept nogil:
+    """Asymptotic Decider face test for Lewiner MC.
+
+    Tests whether the isosurface topology on a cube face requires
+    the surface to cross the face diagonal. face is signed: abs(face)
+    selects face 1-6, sign affects degenerate tiebreaker.
+
+    Face-to-corner mapping (matching scikit-image convention):
+      face 1: v0 v4 v5 v1    face 2: v1 v5 v6 v2
+      face 3: v2 v6 v7 v3    face 4: v3 v7 v4 v0
+      face 5: v0 v3 v2 v1    face 6: v4 v7 v6 v5
+    """
+    cdef int af = face if face > 0 else -face
+    cdef float A = 0.0, B = 0.0, C = 0.0, D = 0.0
+    cdef float AC_BD
+
+    if af == 1:
+        A = v[0]; B = v[4]; C = v[5]; D = v[1]
+    elif af == 2:
+        A = v[1]; B = v[5]; C = v[6]; D = v[2]
+    elif af == 3:
+        A = v[2]; B = v[6]; C = v[7]; D = v[3]
+    elif af == 4:
+        A = v[3]; B = v[7]; C = v[4]; D = v[0]
+    elif af == 5:
+        A = v[0]; B = v[3]; C = v[2]; D = v[1]
+    elif af == 6:
+        A = v[4]; B = v[7]; C = v[6]; D = v[5]
+
+    AC_BD = A * C - B * D
+    if AC_BD > -LEW_EPS and AC_BD < LEW_EPS:
+        return 1 if face >= 0 else 0
+    return 1 if face * A * AC_BD >= 0 else 0
+
+
+cdef inline int _lew_test_internal(
+    float *v, int case_id, int config, int subconfig, int s,
+    const signed char[:, ::1] test6,
+    const signed char[:, ::1] test7,
+    const signed char[:, ::1] test12,
+    const signed char[:, :, ::1] tiling13_5_1,
+) noexcept nogil:
+    """Interior test for Lewiner MC ambiguous cases 4,6,7,10,12,13.
+
+    Parametric evaluation along a reference edge, then Asymptotic Decider
+    on interpolated corner values. Returns 1 or 0 based on topology.
+    """
+    cdef float t, At, Bt, Ct, Dt, a, b, AC_BD
+    cdef int test_val = 0
+    cdef int edge = -1
+
+    At = 0.0; Bt = 0.0; Ct = 0.0; Dt = 0.0
+
+    if case_id == 4 or case_id == 10:
+        a = (v[4]-v[0])*(v[6]-v[2]) - (v[7]-v[3])*(v[5]-v[1])
+        b = (v[2]*(v[4]-v[0]) + v[0]*(v[6]-v[2])
+             - v[1]*(v[7]-v[3]) - v[3]*(v[5]-v[1]))
+        t = -b / (2.0 * a + LEW_EPS)
+        if t < 0.0 or t > 1.0:
+            return 1 if s > 0 else 0
+        At = v[0] + (v[4] - v[0]) * t
+        Bt = v[3] + (v[7] - v[3]) * t
+        Ct = v[2] + (v[6] - v[2]) * t
+        Dt = v[1] + (v[5] - v[1]) * t
+
+    elif case_id == 6 or case_id == 7 or case_id == 12 or case_id == 13:
+        if case_id == 6:
+            edge = test6[config, 2]
+        elif case_id == 7:
+            edge = test7[config, 4]
+        elif case_id == 12:
+            edge = test12[config, 3]
+        elif case_id == 13:
+            edge = tiling13_5_1[config, subconfig, 0]
+
+        # Parametric interpolation along reference edge
+        if edge == 0:
+            t = v[0]/(v[0]-v[1]+LEW_EPS)
+            At=0; Bt=v[3]+(v[2]-v[3])*t; Ct=v[7]+(v[6]-v[7])*t; Dt=v[4]+(v[5]-v[4])*t
+        elif edge == 1:
+            t = v[1]/(v[1]-v[2]+LEW_EPS)
+            At=0; Bt=v[0]+(v[3]-v[0])*t; Ct=v[4]+(v[7]-v[4])*t; Dt=v[5]+(v[6]-v[5])*t
+        elif edge == 2:
+            t = v[2]/(v[2]-v[3]+LEW_EPS)
+            At=0; Bt=v[1]+(v[0]-v[1])*t; Ct=v[5]+(v[4]-v[5])*t; Dt=v[6]+(v[7]-v[6])*t
+        elif edge == 3:
+            t = v[3]/(v[3]-v[0]+LEW_EPS)
+            At=0; Bt=v[2]+(v[1]-v[2])*t; Ct=v[6]+(v[5]-v[6])*t; Dt=v[7]+(v[4]-v[7])*t
+        elif edge == 4:
+            t = v[4]/(v[4]-v[5]+LEW_EPS)
+            At=0; Bt=v[7]+(v[6]-v[7])*t; Ct=v[3]+(v[2]-v[3])*t; Dt=v[0]+(v[1]-v[0])*t
+        elif edge == 5:
+            t = v[5]/(v[5]-v[6]+LEW_EPS)
+            At=0; Bt=v[4]+(v[7]-v[4])*t; Ct=v[0]+(v[3]-v[0])*t; Dt=v[1]+(v[2]-v[1])*t
+        elif edge == 6:
+            t = v[6]/(v[6]-v[7]+LEW_EPS)
+            At=0; Bt=v[5]+(v[4]-v[5])*t; Ct=v[1]+(v[0]-v[1])*t; Dt=v[2]+(v[3]-v[2])*t
+        elif edge == 7:
+            t = v[7]/(v[7]-v[4]+LEW_EPS)
+            At=0; Bt=v[6]+(v[5]-v[6])*t; Ct=v[2]+(v[1]-v[2])*t; Dt=v[3]+(v[0]-v[3])*t
+        elif edge == 8:
+            t = v[0]/(v[0]-v[4]+LEW_EPS)
+            At=0; Bt=v[3]+(v[7]-v[3])*t; Ct=v[2]+(v[6]-v[2])*t; Dt=v[1]+(v[5]-v[1])*t
+        elif edge == 9:
+            t = v[1]/(v[1]-v[5]+LEW_EPS)
+            At=0; Bt=v[0]+(v[4]-v[0])*t; Ct=v[3]+(v[7]-v[3])*t; Dt=v[2]+(v[6]-v[2])*t
+        elif edge == 10:
+            t = v[2]/(v[2]-v[6]+LEW_EPS)
+            At=0; Bt=v[1]+(v[5]-v[1])*t; Ct=v[0]+(v[4]-v[0])*t; Dt=v[3]+(v[7]-v[3])*t
+        elif edge == 11:
+            t = v[3]/(v[3]-v[7]+LEW_EPS)
+            At=0; Bt=v[2]+(v[6]-v[2])*t; Ct=v[1]+(v[5]-v[1])*t; Dt=v[0]+(v[4]-v[0])*t
+
+    # Classify interpolated corners
+    if At >= 0: test_val += 1
+    if Bt >= 0: test_val += 2
+    if Ct >= 0: test_val += 4
+    if Dt >= 0: test_val += 8
+
+    # Interpret result: most cases return s>0, some return s<0
+    if test_val == 5:
+        AC_BD = At * Ct - Bt * Dt
+        if AC_BD < LEW_EPS:
+            return 1 if s > 0 else 0
+        return 1 if s < 0 else 0
+    elif test_val == 10:
+        AC_BD = At * Ct - Bt * Dt
+        if AC_BD >= LEW_EPS:
+            return 1 if s > 0 else 0
+        return 1 if s < 0 else 0
+    elif test_val == 7 or test_val == 11 or test_val == 13 or test_val == 14 or test_val == 15:
+        return 1 if s < 0 else 0
+    else:
+        return 1 if s > 0 else 0
+
+
+cdef inline int _lew_copy_2d(
+    const signed char[:, ::1] tbl, int config, int n_tri,
+    signed char *buf,
+) noexcept nogil:
+    """Copy n_tri*3 edge indices from 2D tiling table to buf. Returns count."""
+    cdef int i, n = n_tri * 3
+    for i in range(n):
+        buf[i] = tbl[config, i]
+    return n
+
+
+cdef inline int _lew_copy_3d(
+    const signed char[:, :, ::1] tbl, int config, int sub, int n_tri,
+    signed char *buf,
+) noexcept nogil:
+    """Copy n_tri*3 edge indices from 3D tiling table to buf. Returns count."""
+    cdef int i, n = n_tri * 3
+    for i in range(n):
+        buf[i] = tbl[config, sub, i]
+    return n
+
+
 def fused_stl_export(
     const unsigned char[::1] packed,
     long long rx, long long ry, long long rz,
