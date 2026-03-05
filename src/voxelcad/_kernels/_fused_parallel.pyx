@@ -2418,6 +2418,8 @@ def fused_stl_export(
                         for dj in range(ky):
                             s_j = (pj - 1) + dj - kry
                             for dk in range(kz_dim):
+                                if kernel[di, dj, dk] == 0:
+                                    continue
                                 s_k = conv_k + dk - krz
                                 f_i = s_i * str_val
                                 f_j = s_j * str_val
@@ -2655,6 +2657,8 @@ def fused_stl_export(
                                     for dj in range(ky):
                                         s_j = (pj - 1) + dj - kry
                                         for dk in range(kz_dim):
+                                            if kernel[di, dj, dk] == 0:
+                                                continue
                                             s_k = conv_k + dk - krz
                                             f_i = s_i * str_val
                                             f_j = s_j * str_val
