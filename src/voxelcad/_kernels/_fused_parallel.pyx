@@ -2410,6 +2410,7 @@ def fused_stl_export(
     cdef int layer_jstride[5]
     cdef int fl_li, fl_off
     cdef float *fl_p
+    cdef float *tmp_ptr
 
     # STL write buffer (4096 triangles * 50 bytes = 200 KB)
     cdef int BUF_MAX = 4096
@@ -2803,23 +2804,15 @@ def fused_stl_export(
         slice_a = slice_a_np
         slice_b = slice_b_np
 
-        # Swap face layers: top becomes bottom, reset top + z-edges
-        # CRITICAL: update ALL memoryviews BEFORE memset to avoid
-        # memsetting the wrong arrays (stale views alias new lax/lay).
-        lax_np, lbx_np = lbx_np, lax_np
-        lay_np, lby_np = lby_np, lay_np
-        lax = lax_np; lay = lay_np
-        lbx = lbx_np; lby = lby_np; zed = zed_np
+        # Swap face layers via C pointer swap (no Python refcounting).
+        # lax(0) ↔ lbx(2), lay(1) ↔ lby(3). zed(4) stays, just reset.
+        # MC loop uses layer_ptrs exclusively — no memoryview aliasing risk.
+        tmp_ptr = layer_ptrs[0]; layer_ptrs[0] = layer_ptrs[2]; layer_ptrs[2] = tmp_ptr
+        tmp_ptr = layer_ptrs[1]; layer_ptrs[1] = layer_ptrs[3]; layer_ptrs[3] = tmp_ptr
         # Reset new top layers + z-edges with NaN via 0xFF memset
-        memset(&lbx[0, 0, 0], 0xFF, (px - 1) * py * 3 * sizeof(float))
-        memset(&lby[0, 0, 0], 0xFF, px * (py - 1) * 3 * sizeof(float))
-        memset(&zed[0, 0, 0], 0xFF, px * py * 3 * sizeof(float))
-        # Update jump table pointers after swap
-        layer_ptrs[0] = &lax[0, 0, 0]
-        layer_ptrs[1] = &lay[0, 0, 0]
-        layer_ptrs[2] = &lbx[0, 0, 0]
-        layer_ptrs[3] = &lby[0, 0, 0]
-        layer_ptrs[4] = &zed[0, 0, 0]
+        memset(layer_ptrs[2], 0xFF, (px - 1) * py * 3 * sizeof(float))
+        memset(layer_ptrs[3], 0xFF, px * (py - 1) * 3 * sizeof(float))
+        memset(layer_ptrs[4], 0xFF, px * py * 3 * sizeof(float))
 
         if k + 2 < pz:
             # Compute next convolved Z-slice into slice_b
