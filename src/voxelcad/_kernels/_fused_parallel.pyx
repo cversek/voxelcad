@@ -1650,14 +1650,60 @@ def sweep_mc_mesh(
             vertices: float32 array (N, 3) — deduplicated
             faces: int32 array (M, 3) — triangle vertex indices
     """
-    from voxelcad._kernels._mc_tables import EDGE_TABLE, TRI_TABLE
+    from voxelcad._kernels import _mc_tables_lewiner as _lew_mod
 
     cdef int nx = sdf.shape[0]
     cdef int ny = sdf.shape[1]
     cdef int nz = sdf.shape[2]
 
-    cdef unsigned short[::1] edge_tbl = EDGE_TABLE
-    cdef signed char[:, ::1] tri_tbl = TRI_TABLE
+    # Lewiner MC lookup tables
+    cdef const signed char[:, ::1] lew_cases = _lew_mod.cases
+    cdef const signed char[:, ::1] lew_t1 = _lew_mod.tiling1
+    cdef const signed char[:, ::1] lew_t2 = _lew_mod.tiling2
+    cdef const signed char[:, ::1] lew_t3_1 = _lew_mod.tiling3_1
+    cdef const signed char[:, ::1] lew_t3_2 = _lew_mod.tiling3_2
+    cdef const signed char[:, ::1] lew_t4_1 = _lew_mod.tiling4_1
+    cdef const signed char[:, ::1] lew_t4_2 = _lew_mod.tiling4_2
+    cdef const signed char[:, ::1] lew_t5 = _lew_mod.tiling5
+    cdef const signed char[:, ::1] lew_t6_11 = _lew_mod.tiling6_1_1
+    cdef const signed char[:, ::1] lew_t6_12 = _lew_mod.tiling6_1_2
+    cdef const signed char[:, ::1] lew_t6_2 = _lew_mod.tiling6_2
+    cdef const signed char[:, ::1] lew_t7_1 = _lew_mod.tiling7_1
+    cdef const signed char[:, :, ::1] lew_t7_2 = _lew_mod.tiling7_2
+    cdef const signed char[:, :, ::1] lew_t7_3 = _lew_mod.tiling7_3
+    cdef const signed char[:, ::1] lew_t7_41 = _lew_mod.tiling7_4_1
+    cdef const signed char[:, ::1] lew_t7_42 = _lew_mod.tiling7_4_2
+    cdef const signed char[:, ::1] lew_t8 = _lew_mod.tiling8
+    cdef const signed char[:, ::1] lew_t9 = _lew_mod.tiling9
+    cdef const signed char[:, ::1] lew_t10_11 = _lew_mod.tiling10_1_1
+    cdef const signed char[:, ::1] lew_t10_11p = _lew_mod.tiling10_1_1_
+    cdef const signed char[:, ::1] lew_t10_12 = _lew_mod.tiling10_1_2
+    cdef const signed char[:, ::1] lew_t10_2 = _lew_mod.tiling10_2
+    cdef const signed char[:, ::1] lew_t10_2p = _lew_mod.tiling10_2_
+    cdef const signed char[:, ::1] lew_t11 = _lew_mod.tiling11
+    cdef const signed char[:, ::1] lew_t12_11 = _lew_mod.tiling12_1_1
+    cdef const signed char[:, ::1] lew_t12_11p = _lew_mod.tiling12_1_1_
+    cdef const signed char[:, ::1] lew_t12_12 = _lew_mod.tiling12_1_2
+    cdef const signed char[:, ::1] lew_t12_2 = _lew_mod.tiling12_2
+    cdef const signed char[:, ::1] lew_t12_2p = _lew_mod.tiling12_2_
+    cdef const signed char[:, ::1] lew_t13_1 = _lew_mod.tiling13_1
+    cdef const signed char[:, ::1] lew_t13_1p = _lew_mod.tiling13_1_
+    cdef const signed char[:, :, ::1] lew_t13_2 = _lew_mod.tiling13_2
+    cdef const signed char[:, :, ::1] lew_t13_2p = _lew_mod.tiling13_2_
+    cdef const signed char[:, :, ::1] lew_t13_3 = _lew_mod.tiling13_3
+    cdef const signed char[:, :, ::1] lew_t13_3p = _lew_mod.tiling13_3_
+    cdef const signed char[:, :, ::1] lew_t13_4 = _lew_mod.tiling13_4
+    cdef const signed char[:, :, ::1] lew_t13_51 = _lew_mod.tiling13_5_1
+    cdef const signed char[:, :, ::1] lew_t13_52 = _lew_mod.tiling13_5_2
+    cdef const signed char[:, ::1] lew_t14 = _lew_mod.tiling14
+    cdef const signed char[::1] lew_test3 = _lew_mod.test3
+    cdef const signed char[::1] lew_test4 = _lew_mod.test4
+    cdef const signed char[:, ::1] lew_test6 = _lew_mod.test6
+    cdef const signed char[:, ::1] lew_test7 = _lew_mod.test7
+    cdef const signed char[:, ::1] lew_test10 = _lew_mod.test10
+    cdef const signed char[:, ::1] lew_test12 = _lew_mod.test12
+    cdef const signed char[:, ::1] lew_test13 = _lew_mod.test13
+    cdef const signed char[::1] lew_subconfig13 = _lew_mod.subconfig13
 
     # Face-layer arrays for vertex dedup.
     # x-edges at z=k: between (i,j,k) and (i+1,j,k), shape (nx-1, ny)
@@ -1688,9 +1734,14 @@ def sweep_mc_mesh(
     cdef int cube_idx, vid
     cdef unsigned short edges
     cdef float vals[8]
-    cdef int edge_vids[12]
+    cdef int edge_vids[13]  # 0-11 = edges, 12 = center vertex
     cdef float v0_val, v1_val, t_interp
     cdef int v0_idx, v1_idx
+    # Lewiner dispatch variables
+    cdef int case_id, lew_config, lew_subconfig
+    cdef signed char edge_buf[36]
+    cdef int n_edges, need_edge12
+    cdef float w_e, wsum
 
     for k in range(nz - 1):
         # Reset top-face layers and z-edges for this slice
@@ -1713,20 +1764,171 @@ def sweep_mc_mesh(
                 vals[6] = <float>sdf[i+1, j+1, k+1]
                 vals[7] = <float>sdf[i, j+1, k+1]
 
-                # Compute cube index
+                # Lewiner convention: val > isovalue → bit set
                 cube_idx = 0
-                if vals[0] < isovalue: cube_idx |= 1
-                if vals[1] < isovalue: cube_idx |= 2
-                if vals[2] < isovalue: cube_idx |= 4
-                if vals[3] < isovalue: cube_idx |= 8
-                if vals[4] < isovalue: cube_idx |= 16
-                if vals[5] < isovalue: cube_idx |= 32
-                if vals[6] < isovalue: cube_idx |= 64
-                if vals[7] < isovalue: cube_idx |= 128
+                if vals[0] > isovalue: cube_idx |= 1
+                if vals[1] > isovalue: cube_idx |= 2
+                if vals[2] > isovalue: cube_idx |= 4
+                if vals[3] > isovalue: cube_idx |= 8
+                if vals[4] > isovalue: cube_idx |= 16
+                if vals[5] > isovalue: cube_idx |= 32
+                if vals[6] > isovalue: cube_idx |= 64
+                if vals[7] > isovalue: cube_idx |= 128
 
-                edges = edge_tbl[cube_idx]
-                if edges == 0:
+                # Lewiner case dispatch
+                case_id = lew_cases[cube_idx, 0]
+                if case_id == 0:
                     continue
+                lew_config = lew_cases[cube_idx, 1]
+                lew_subconfig = 0
+                n_edges = 0
+
+                if case_id == 1:
+                    n_edges = _lew_copy_2d(lew_t1, lew_config, 1, edge_buf)
+                elif case_id == 2:
+                    n_edges = _lew_copy_2d(lew_t2, lew_config, 2, edge_buf)
+                elif case_id == 3:
+                    if _lew_test_face(vals, lew_test3[lew_config]):
+                        n_edges = _lew_copy_2d(lew_t3_2, lew_config, 4, edge_buf)
+                    else:
+                        n_edges = _lew_copy_2d(lew_t3_1, lew_config, 2, edge_buf)
+                elif case_id == 4:
+                    if _lew_test_internal(vals, 4, lew_config, 0,
+                                          lew_test4[lew_config],
+                                          lew_test6, lew_test7, lew_test12, lew_t13_51):
+                        n_edges = _lew_copy_2d(lew_t4_1, lew_config, 2, edge_buf)
+                    else:
+                        n_edges = _lew_copy_2d(lew_t4_2, lew_config, 6, edge_buf)
+                elif case_id == 5:
+                    n_edges = _lew_copy_2d(lew_t5, lew_config, 3, edge_buf)
+                elif case_id == 6:
+                    if _lew_test_face(vals, lew_test6[lew_config, 0]):
+                        n_edges = _lew_copy_2d(lew_t6_2, lew_config, 5, edge_buf)
+                    else:
+                        if _lew_test_internal(vals, 6, lew_config, 0,
+                                              lew_test6[lew_config, 1],
+                                              lew_test6, lew_test7, lew_test12, lew_t13_51):
+                            n_edges = _lew_copy_2d(lew_t6_11, lew_config, 3, edge_buf)
+                        else:
+                            n_edges = _lew_copy_2d(lew_t6_12, lew_config, 9, edge_buf)
+                elif case_id == 7:
+                    lew_subconfig = 0
+                    if _lew_test_face(vals, lew_test7[lew_config, 0]):
+                        lew_subconfig += 1
+                    if _lew_test_face(vals, lew_test7[lew_config, 1]):
+                        lew_subconfig += 2
+                    if _lew_test_face(vals, lew_test7[lew_config, 2]):
+                        lew_subconfig += 4
+                    if lew_subconfig == 0:
+                        n_edges = _lew_copy_2d(lew_t7_1, lew_config, 3, edge_buf)
+                    elif lew_subconfig == 1:
+                        n_edges = _lew_copy_3d(lew_t7_2, lew_config, 0, 5, edge_buf)
+                    elif lew_subconfig == 2:
+                        n_edges = _lew_copy_3d(lew_t7_2, lew_config, 1, 5, edge_buf)
+                    elif lew_subconfig == 3:
+                        n_edges = _lew_copy_3d(lew_t7_3, lew_config, 0, 9, edge_buf)
+                    elif lew_subconfig == 4:
+                        n_edges = _lew_copy_3d(lew_t7_2, lew_config, 2, 5, edge_buf)
+                    elif lew_subconfig == 5:
+                        n_edges = _lew_copy_3d(lew_t7_3, lew_config, 1, 9, edge_buf)
+                    elif lew_subconfig == 6:
+                        n_edges = _lew_copy_3d(lew_t7_3, lew_config, 2, 9, edge_buf)
+                    elif lew_subconfig == 7:
+                        if _lew_test_internal(vals, 7, lew_config, lew_subconfig,
+                                              lew_test7[lew_config, 3],
+                                              lew_test6, lew_test7, lew_test12, lew_t13_51):
+                            n_edges = _lew_copy_2d(lew_t7_42, lew_config, 9, edge_buf)
+                        else:
+                            n_edges = _lew_copy_2d(lew_t7_41, lew_config, 5, edge_buf)
+                elif case_id == 8:
+                    n_edges = _lew_copy_2d(lew_t8, lew_config, 2, edge_buf)
+                elif case_id == 9:
+                    n_edges = _lew_copy_2d(lew_t9, lew_config, 4, edge_buf)
+                elif case_id == 10:
+                    if _lew_test_face(vals, lew_test10[lew_config, 0]):
+                        if _lew_test_face(vals, lew_test10[lew_config, 1]):
+                            n_edges = _lew_copy_2d(lew_t10_11p, lew_config, 4, edge_buf)
+                        else:
+                            n_edges = _lew_copy_2d(lew_t10_2, lew_config, 8, edge_buf)
+                    else:
+                        if _lew_test_face(vals, lew_test10[lew_config, 1]):
+                            n_edges = _lew_copy_2d(lew_t10_2p, lew_config, 8, edge_buf)
+                        else:
+                            if _lew_test_internal(vals, 10, lew_config, 0,
+                                                  lew_test10[lew_config, 2],
+                                                  lew_test6, lew_test7, lew_test12, lew_t13_51):
+                                n_edges = _lew_copy_2d(lew_t10_11, lew_config, 4, edge_buf)
+                            else:
+                                n_edges = _lew_copy_2d(lew_t10_12, lew_config, 8, edge_buf)
+                elif case_id == 11:
+                    n_edges = _lew_copy_2d(lew_t11, lew_config, 4, edge_buf)
+                elif case_id == 12:
+                    if _lew_test_face(vals, lew_test12[lew_config, 0]):
+                        if _lew_test_face(vals, lew_test12[lew_config, 1]):
+                            n_edges = _lew_copy_2d(lew_t12_11p, lew_config, 4, edge_buf)
+                        else:
+                            n_edges = _lew_copy_2d(lew_t12_2, lew_config, 8, edge_buf)
+                    else:
+                        if _lew_test_face(vals, lew_test12[lew_config, 1]):
+                            n_edges = _lew_copy_2d(lew_t12_2p, lew_config, 8, edge_buf)
+                        else:
+                            if _lew_test_internal(vals, 12, lew_config, 0,
+                                                  lew_test12[lew_config, 2],
+                                                  lew_test6, lew_test7, lew_test12, lew_t13_51):
+                                n_edges = _lew_copy_2d(lew_t12_11, lew_config, 4, edge_buf)
+                            else:
+                                n_edges = _lew_copy_2d(lew_t12_12, lew_config, 8, edge_buf)
+                elif case_id == 13:
+                    lew_subconfig = 0
+                    if _lew_test_face(vals, lew_test13[lew_config, 0]):
+                        lew_subconfig |= 1
+                    if _lew_test_face(vals, lew_test13[lew_config, 1]):
+                        lew_subconfig |= 2
+                    if _lew_test_face(vals, lew_test13[lew_config, 2]):
+                        lew_subconfig |= 4
+                    if _lew_test_face(vals, lew_test13[lew_config, 3]):
+                        lew_subconfig |= 8
+                    if _lew_test_face(vals, lew_test13[lew_config, 4]):
+                        lew_subconfig |= 16
+                    if _lew_test_face(vals, lew_test13[lew_config, 5]):
+                        lew_subconfig |= 32
+                    lew_subconfig = lew_subconfig13[lew_subconfig]
+                    if lew_subconfig == 0:
+                        n_edges = _lew_copy_2d(lew_t13_1, lew_config, 4, edge_buf)
+                    elif 1 <= lew_subconfig <= 6:
+                        n_edges = _lew_copy_3d(lew_t13_2, lew_config, lew_subconfig - 1, 6, edge_buf)
+                    elif 7 <= lew_subconfig <= 18:
+                        n_edges = _lew_copy_3d(lew_t13_3, lew_config, lew_subconfig - 7, 10, edge_buf)
+                    elif 19 <= lew_subconfig <= 22:
+                        n_edges = _lew_copy_3d(lew_t13_4, lew_config, lew_subconfig - 19, 12, edge_buf)
+                    elif 23 <= lew_subconfig <= 26:
+                        if _lew_test_internal(vals, 13, lew_config,
+                                              lew_subconfig - 23,
+                                              lew_test13[lew_config, 6],
+                                              lew_test6, lew_test7, lew_test12, lew_t13_51):
+                            n_edges = _lew_copy_3d(lew_t13_51, lew_config, lew_subconfig - 23, 6, edge_buf)
+                        else:
+                            n_edges = _lew_copy_3d(lew_t13_52, lew_config, lew_subconfig - 23, 10, edge_buf)
+                    elif 27 <= lew_subconfig <= 38:
+                        n_edges = _lew_copy_3d(lew_t13_3p, lew_config, lew_subconfig - 27, 10, edge_buf)
+                    elif 39 <= lew_subconfig <= 44:
+                        n_edges = _lew_copy_3d(lew_t13_2p, lew_config, lew_subconfig - 39, 6, edge_buf)
+                    elif lew_subconfig == 45:
+                        n_edges = _lew_copy_2d(lew_t13_1p, lew_config, 4, edge_buf)
+                elif case_id == 14:
+                    n_edges = _lew_copy_2d(lew_t14, lew_config, 4, edge_buf)
+
+                if n_edges == 0:
+                    continue
+
+                # Build edges_mask from edge_buf; detect edge 12
+                edges = 0
+                need_edge12 = 0
+                for t_idx in range(n_edges):
+                    if edge_buf[t_idx] == 12:
+                        need_edge12 = 1
+                    elif 0 <= edge_buf[t_idx] < 12:
+                        edges |= <unsigned short>(1 << edge_buf[t_idx])
 
                 # Look up or create vertex for each active edge
                 for e in range(12):
@@ -1806,17 +2008,43 @@ def sweep_mc_mesh(
                     elif e == 10: zed[i + 1, j + 1] = vid
                     else: zed[i, j + 1] = vid
 
-                # Emit triangles using shared vertex indices
+                # Edge 12: center vertex (inverse-distance weighted avg)
+                if need_edge12:
+                    if n_verts >= verts_np.shape[0]:
+                        new_size = verts_np.shape[0] * 2
+                        verts_np.resize((new_size, 3), refcheck=False)
+                        verts = verts_np
+                    wsum = 0.0
+                    verts[n_verts, 0] = 0.0
+                    verts[n_verts, 1] = 0.0
+                    verts[n_verts, 2] = 0.0
+                    for e in range(8):
+                        w_e = vals[e] - isovalue
+                        if w_e < 0:
+                            w_e = -w_e
+                        w_e = 1.0 / (1e-12 + w_e)
+                        verts[n_verts, 0] += w_e * (ox + vsx * <float>(i + _VTX_DI[e]))
+                        verts[n_verts, 1] += w_e * (oy + vsy * <float>(j + _VTX_DJ[e]))
+                        verts[n_verts, 2] += w_e * (oz + vsz * <float>(k + _VTX_DK[e]))
+                        wsum += w_e
+                    if wsum > 0.0:
+                        verts[n_verts, 0] /= wsum
+                        verts[n_verts, 1] /= wsum
+                        verts[n_verts, 2] /= wsum
+                    edge_vids[12] = n_verts
+                    n_verts += 1
+
+                # Emit triangles from edge_buf (Lewiner guarantees correct winding)
                 t_idx = 0
-                while tri_tbl[cube_idx, t_idx] != -1:
+                while t_idx < n_edges:
                     if n_faces >= faces_np.shape[0]:
                         new_size = faces_np.shape[0] * 2
                         faces_np.resize((new_size, 3), refcheck=False)
                         faces = faces_np
 
-                    faces[n_faces, 0] = edge_vids[tri_tbl[cube_idx, t_idx]]
-                    faces[n_faces, 1] = edge_vids[tri_tbl[cube_idx, t_idx + 1]]
-                    faces[n_faces, 2] = edge_vids[tri_tbl[cube_idx, t_idx + 2]]
+                    faces[n_faces, 0] = edge_vids[edge_buf[t_idx]]
+                    faces[n_faces, 1] = edge_vids[edge_buf[t_idx + 1]]
+                    faces[n_faces, 2] = edge_vids[edge_buf[t_idx + 2]]
                     n_faces += 1
                     t_idx += 3
 
