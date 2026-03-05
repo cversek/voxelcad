@@ -2034,7 +2034,7 @@ def fused_stl_export(
     Returns:
         int: number of triangles written
     """
-    from voxelcad._kernels._mc_tables import EDGE_TABLE, TRI_TABLE
+    from voxelcad._kernels import _mc_tables_lewiner as _lew_mod
 
     # Strided output dimensions (same as fused_scale_convolve)
     cdef int sx = <int>((rx + stride - 1) // stride)
@@ -2071,8 +2071,55 @@ def fused_stl_export(
         mc_oy = 0.0
         mc_oz = 0.0
 
-    cdef unsigned short[::1] edge_tbl = EDGE_TABLE
-    cdef signed char[:, ::1] tri_tbl = TRI_TABLE
+    # Lewiner MC lookup tables (Lewiner et al. 2003, ported from scikit-image)
+    cdef const signed char[:, ::1] lew_cases = _lew_mod.cases
+    cdef const signed char[:, ::1] lew_t1 = _lew_mod.tiling1
+    cdef const signed char[:, ::1] lew_t2 = _lew_mod.tiling2
+    cdef const signed char[:, ::1] lew_t3_1 = _lew_mod.tiling3_1
+    cdef const signed char[:, ::1] lew_t3_2 = _lew_mod.tiling3_2
+    cdef const signed char[:, ::1] lew_t4_1 = _lew_mod.tiling4_1
+    cdef const signed char[:, ::1] lew_t4_2 = _lew_mod.tiling4_2
+    cdef const signed char[:, ::1] lew_t5 = _lew_mod.tiling5
+    cdef const signed char[:, ::1] lew_t6_11 = _lew_mod.tiling6_1_1
+    cdef const signed char[:, ::1] lew_t6_12 = _lew_mod.tiling6_1_2
+    cdef const signed char[:, ::1] lew_t6_2 = _lew_mod.tiling6_2
+    cdef const signed char[:, ::1] lew_t7_1 = _lew_mod.tiling7_1
+    cdef const signed char[:, :, ::1] lew_t7_2 = _lew_mod.tiling7_2
+    cdef const signed char[:, :, ::1] lew_t7_3 = _lew_mod.tiling7_3
+    cdef const signed char[:, ::1] lew_t7_41 = _lew_mod.tiling7_4_1
+    cdef const signed char[:, ::1] lew_t7_42 = _lew_mod.tiling7_4_2
+    cdef const signed char[:, ::1] lew_t8 = _lew_mod.tiling8
+    cdef const signed char[:, ::1] lew_t9 = _lew_mod.tiling9
+    cdef const signed char[:, ::1] lew_t10_11 = _lew_mod.tiling10_1_1
+    cdef const signed char[:, ::1] lew_t10_11p = _lew_mod.tiling10_1_1_
+    cdef const signed char[:, ::1] lew_t10_12 = _lew_mod.tiling10_1_2
+    cdef const signed char[:, ::1] lew_t10_2 = _lew_mod.tiling10_2
+    cdef const signed char[:, ::1] lew_t10_2p = _lew_mod.tiling10_2_
+    cdef const signed char[:, ::1] lew_t11 = _lew_mod.tiling11
+    cdef const signed char[:, ::1] lew_t12_11 = _lew_mod.tiling12_1_1
+    cdef const signed char[:, ::1] lew_t12_11p = _lew_mod.tiling12_1_1_
+    cdef const signed char[:, ::1] lew_t12_12 = _lew_mod.tiling12_1_2
+    cdef const signed char[:, ::1] lew_t12_2 = _lew_mod.tiling12_2
+    cdef const signed char[:, ::1] lew_t12_2p = _lew_mod.tiling12_2_
+    cdef const signed char[:, ::1] lew_t13_1 = _lew_mod.tiling13_1
+    cdef const signed char[:, ::1] lew_t13_1p = _lew_mod.tiling13_1_
+    cdef const signed char[:, :, ::1] lew_t13_2 = _lew_mod.tiling13_2
+    cdef const signed char[:, :, ::1] lew_t13_2p = _lew_mod.tiling13_2_
+    cdef const signed char[:, :, ::1] lew_t13_3 = _lew_mod.tiling13_3
+    cdef const signed char[:, :, ::1] lew_t13_3p = _lew_mod.tiling13_3_
+    cdef const signed char[:, :, ::1] lew_t13_4 = _lew_mod.tiling13_4
+    cdef const signed char[:, :, ::1] lew_t13_51 = _lew_mod.tiling13_5_1
+    cdef const signed char[:, :, ::1] lew_t13_52 = _lew_mod.tiling13_5_2
+    cdef const signed char[:, ::1] lew_t14 = _lew_mod.tiling14
+    # Lewiner test + subconfig tables
+    cdef const signed char[::1] lew_test3 = _lew_mod.test3
+    cdef const signed char[::1] lew_test4 = _lew_mod.test4
+    cdef const signed char[:, ::1] lew_test6 = _lew_mod.test6
+    cdef const signed char[:, ::1] lew_test7 = _lew_mod.test7
+    cdef const signed char[:, ::1] lew_test10 = _lew_mod.test10
+    cdef const signed char[:, ::1] lew_test12 = _lew_mod.test12
+    cdef const signed char[:, ::1] lew_test13 = _lew_mod.test13
+    cdef const signed char[::1] lew_subconfig13 = _lew_mod.subconfig13
 
     # Two Z-slices of convolved output (int8)
     slice_a_np = np.full((px, py), -1, dtype=np.int8)
@@ -2114,14 +2161,18 @@ def fused_stl_export(
     cdef int cube_idx
     cdef unsigned short edges_mask
     cdef float corner_vals[8]
-    cdef float vert_coords[12][3]
+    cdef float vert_coords[13][3]  # 0-11 = edges, 12 = center vertex
     cdef float v0_val, v1_val, t_interp
     cdef int v0_idx, v1_idx
     cdef int tri_count = 0
     cdef float vx, vy, vz
-    # Cross-product normal computation + gradient-based orientation
+    # Cross-product normal computation (no gradient — Lewiner guarantees winding)
     cdef float ux, uy, uz, wx, wy, wz, nn
-    cdef float gx, gy, gz  # SDF gradient at cell center
+    # Lewiner dispatch variables
+    cdef int case_id, lew_config, lew_subconfig
+    cdef signed char edge_buf[36]  # max 12 tri * 3 edges
+    cdef int n_edges, need_edge12
+    cdef float w_e, wsum
 
     # Face-layer jump table: pointers + strides for indexed edge dispatch
     cdef float *layer_ptrs[5]
@@ -2230,19 +2281,172 @@ def fused_stl_export(
                 corner_vals[6] = <float>slice_b[i + 1, j + 1]
                 corner_vals[7] = <float>slice_b[i, j + 1]
 
+                # Lewiner convention: val > isovalue → bit set
                 cube_idx = 0
-                if corner_vals[0] < isovalue: cube_idx |= 1
-                if corner_vals[1] < isovalue: cube_idx |= 2
-                if corner_vals[2] < isovalue: cube_idx |= 4
-                if corner_vals[3] < isovalue: cube_idx |= 8
-                if corner_vals[4] < isovalue: cube_idx |= 16
-                if corner_vals[5] < isovalue: cube_idx |= 32
-                if corner_vals[6] < isovalue: cube_idx |= 64
-                if corner_vals[7] < isovalue: cube_idx |= 128
+                if corner_vals[0] > isovalue: cube_idx |= 1
+                if corner_vals[1] > isovalue: cube_idx |= 2
+                if corner_vals[2] > isovalue: cube_idx |= 4
+                if corner_vals[3] > isovalue: cube_idx |= 8
+                if corner_vals[4] > isovalue: cube_idx |= 16
+                if corner_vals[5] > isovalue: cube_idx |= 32
+                if corner_vals[6] > isovalue: cube_idx |= 64
+                if corner_vals[7] > isovalue: cube_idx |= 128
 
-                edges_mask = edge_tbl[cube_idx]
-                if edges_mask == 0:
+                # Lewiner case dispatch
+                case_id = lew_cases[cube_idx, 0]
+                if case_id == 0:
                     continue
+                lew_config = lew_cases[cube_idx, 1]
+                lew_subconfig = 0
+                n_edges = 0
+
+                # ---- The big switch (Lewiner et al. 2003) ----
+                if case_id == 1:
+                    n_edges = _lew_copy_2d(lew_t1, lew_config, 1, edge_buf)
+                elif case_id == 2:
+                    n_edges = _lew_copy_2d(lew_t2, lew_config, 2, edge_buf)
+                elif case_id == 3:
+                    if _lew_test_face(corner_vals, lew_test3[lew_config]):
+                        n_edges = _lew_copy_2d(lew_t3_2, lew_config, 4, edge_buf)
+                    else:
+                        n_edges = _lew_copy_2d(lew_t3_1, lew_config, 2, edge_buf)
+                elif case_id == 4:
+                    if _lew_test_internal(corner_vals, 4, lew_config, 0,
+                                          lew_test4[lew_config],
+                                          lew_test6, lew_test7, lew_test12, lew_t13_51):
+                        n_edges = _lew_copy_2d(lew_t4_1, lew_config, 2, edge_buf)
+                    else:
+                        n_edges = _lew_copy_2d(lew_t4_2, lew_config, 6, edge_buf)
+                elif case_id == 5:
+                    n_edges = _lew_copy_2d(lew_t5, lew_config, 3, edge_buf)
+                elif case_id == 6:
+                    if _lew_test_face(corner_vals, lew_test6[lew_config, 0]):
+                        n_edges = _lew_copy_2d(lew_t6_2, lew_config, 5, edge_buf)
+                    else:
+                        if _lew_test_internal(corner_vals, 6, lew_config, 0,
+                                              lew_test6[lew_config, 1],
+                                              lew_test6, lew_test7, lew_test12, lew_t13_51):
+                            n_edges = _lew_copy_2d(lew_t6_11, lew_config, 3, edge_buf)
+                        else:
+                            n_edges = _lew_copy_2d(lew_t6_12, lew_config, 9, edge_buf)
+                elif case_id == 7:
+                    lew_subconfig = 0
+                    if _lew_test_face(corner_vals, lew_test7[lew_config, 0]):
+                        lew_subconfig += 1
+                    if _lew_test_face(corner_vals, lew_test7[lew_config, 1]):
+                        lew_subconfig += 2
+                    if _lew_test_face(corner_vals, lew_test7[lew_config, 2]):
+                        lew_subconfig += 4
+                    if lew_subconfig == 0:
+                        n_edges = _lew_copy_2d(lew_t7_1, lew_config, 3, edge_buf)
+                    elif lew_subconfig == 1:
+                        n_edges = _lew_copy_3d(lew_t7_2, lew_config, 0, 5, edge_buf)
+                    elif lew_subconfig == 2:
+                        n_edges = _lew_copy_3d(lew_t7_2, lew_config, 1, 5, edge_buf)
+                    elif lew_subconfig == 3:
+                        n_edges = _lew_copy_3d(lew_t7_3, lew_config, 0, 9, edge_buf)
+                    elif lew_subconfig == 4:
+                        n_edges = _lew_copy_3d(lew_t7_2, lew_config, 2, 5, edge_buf)
+                    elif lew_subconfig == 5:
+                        n_edges = _lew_copy_3d(lew_t7_3, lew_config, 1, 9, edge_buf)
+                    elif lew_subconfig == 6:
+                        n_edges = _lew_copy_3d(lew_t7_3, lew_config, 2, 9, edge_buf)
+                    elif lew_subconfig == 7:
+                        if _lew_test_internal(corner_vals, 7, lew_config, lew_subconfig,
+                                              lew_test7[lew_config, 3],
+                                              lew_test6, lew_test7, lew_test12, lew_t13_51):
+                            n_edges = _lew_copy_2d(lew_t7_42, lew_config, 9, edge_buf)
+                        else:
+                            n_edges = _lew_copy_2d(lew_t7_41, lew_config, 5, edge_buf)
+                elif case_id == 8:
+                    n_edges = _lew_copy_2d(lew_t8, lew_config, 2, edge_buf)
+                elif case_id == 9:
+                    n_edges = _lew_copy_2d(lew_t9, lew_config, 4, edge_buf)
+                elif case_id == 10:
+                    if _lew_test_face(corner_vals, lew_test10[lew_config, 0]):
+                        if _lew_test_face(corner_vals, lew_test10[lew_config, 1]):
+                            n_edges = _lew_copy_2d(lew_t10_11p, lew_config, 4, edge_buf)
+                        else:
+                            n_edges = _lew_copy_2d(lew_t10_2, lew_config, 8, edge_buf)
+                    else:
+                        if _lew_test_face(corner_vals, lew_test10[lew_config, 1]):
+                            n_edges = _lew_copy_2d(lew_t10_2p, lew_config, 8, edge_buf)
+                        else:
+                            if _lew_test_internal(corner_vals, 10, lew_config, 0,
+                                                  lew_test10[lew_config, 2],
+                                                  lew_test6, lew_test7, lew_test12, lew_t13_51):
+                                n_edges = _lew_copy_2d(lew_t10_11, lew_config, 4, edge_buf)
+                            else:
+                                n_edges = _lew_copy_2d(lew_t10_12, lew_config, 8, edge_buf)
+                elif case_id == 11:
+                    n_edges = _lew_copy_2d(lew_t11, lew_config, 4, edge_buf)
+                elif case_id == 12:
+                    if _lew_test_face(corner_vals, lew_test12[lew_config, 0]):
+                        if _lew_test_face(corner_vals, lew_test12[lew_config, 1]):
+                            n_edges = _lew_copy_2d(lew_t12_11p, lew_config, 4, edge_buf)
+                        else:
+                            n_edges = _lew_copy_2d(lew_t12_2, lew_config, 8, edge_buf)
+                    else:
+                        if _lew_test_face(corner_vals, lew_test12[lew_config, 1]):
+                            n_edges = _lew_copy_2d(lew_t12_2p, lew_config, 8, edge_buf)
+                        else:
+                            if _lew_test_internal(corner_vals, 12, lew_config, 0,
+                                                  lew_test12[lew_config, 2],
+                                                  lew_test6, lew_test7, lew_test12, lew_t13_51):
+                                n_edges = _lew_copy_2d(lew_t12_11, lew_config, 4, edge_buf)
+                            else:
+                                n_edges = _lew_copy_2d(lew_t12_12, lew_config, 8, edge_buf)
+                elif case_id == 13:
+                    lew_subconfig = 0
+                    if _lew_test_face(corner_vals, lew_test13[lew_config, 0]):
+                        lew_subconfig |= 1
+                    if _lew_test_face(corner_vals, lew_test13[lew_config, 1]):
+                        lew_subconfig |= 2
+                    if _lew_test_face(corner_vals, lew_test13[lew_config, 2]):
+                        lew_subconfig |= 4
+                    if _lew_test_face(corner_vals, lew_test13[lew_config, 3]):
+                        lew_subconfig |= 8
+                    if _lew_test_face(corner_vals, lew_test13[lew_config, 4]):
+                        lew_subconfig |= 16
+                    if _lew_test_face(corner_vals, lew_test13[lew_config, 5]):
+                        lew_subconfig |= 32
+                    lew_subconfig = lew_subconfig13[lew_subconfig]
+                    if lew_subconfig == 0:
+                        n_edges = _lew_copy_2d(lew_t13_1, lew_config, 4, edge_buf)
+                    elif 1 <= lew_subconfig <= 6:
+                        n_edges = _lew_copy_3d(lew_t13_2, lew_config, lew_subconfig - 1, 6, edge_buf)
+                    elif 7 <= lew_subconfig <= 18:
+                        n_edges = _lew_copy_3d(lew_t13_3, lew_config, lew_subconfig - 7, 10, edge_buf)
+                    elif 19 <= lew_subconfig <= 22:
+                        n_edges = _lew_copy_3d(lew_t13_4, lew_config, lew_subconfig - 19, 12, edge_buf)
+                    elif 23 <= lew_subconfig <= 26:
+                        if _lew_test_internal(corner_vals, 13, lew_config,
+                                              lew_subconfig - 23,
+                                              lew_test13[lew_config, 6],
+                                              lew_test6, lew_test7, lew_test12, lew_t13_51):
+                            n_edges = _lew_copy_3d(lew_t13_51, lew_config, lew_subconfig - 23, 6, edge_buf)
+                        else:
+                            n_edges = _lew_copy_3d(lew_t13_52, lew_config, lew_subconfig - 23, 10, edge_buf)
+                    elif 27 <= lew_subconfig <= 38:
+                        n_edges = _lew_copy_3d(lew_t13_3p, lew_config, lew_subconfig - 27, 10, edge_buf)
+                    elif 39 <= lew_subconfig <= 44:
+                        n_edges = _lew_copy_3d(lew_t13_2p, lew_config, lew_subconfig - 39, 6, edge_buf)
+                    elif lew_subconfig == 45:
+                        n_edges = _lew_copy_2d(lew_t13_1p, lew_config, 4, edge_buf)
+                elif case_id == 14:
+                    n_edges = _lew_copy_2d(lew_t14, lew_config, 4, edge_buf)
+
+                if n_edges == 0:
+                    continue
+
+                # Build edges_mask from edge_buf; detect edge 12
+                edges_mask = 0
+                need_edge12 = 0
+                for t_idx in range(n_edges):
+                    if edge_buf[t_idx] == 12:
+                        need_edge12 = 1
+                    elif 0 <= edge_buf[t_idx] < 12:
+                        edges_mask |= <unsigned short>(1 << edge_buf[t_idx])
 
                 # Look up or interpolate vertices on active edges
                 for e in range(12):
@@ -2288,27 +2492,32 @@ def fused_stl_export(
                     fl_p[fl_off + 1] = vert_coords[e][1]
                     fl_p[fl_off + 2] = vert_coords[e][2]
 
-                # SDF gradient at cell center (from 8 corner values)
-                # Points outward (from positive/inside toward negative/outside)
-                gx = ((corner_vals[1] - corner_vals[0])
-                      + (corner_vals[2] - corner_vals[3])
-                      + (corner_vals[5] - corner_vals[4])
-                      + (corner_vals[6] - corner_vals[7])) * 0.25
-                gy = ((corner_vals[3] - corner_vals[0])
-                      + (corner_vals[2] - corner_vals[1])
-                      + (corner_vals[7] - corner_vals[4])
-                      + (corner_vals[6] - corner_vals[5])) * 0.25
-                gz = ((corner_vals[4] - corner_vals[0])
-                      + (corner_vals[5] - corner_vals[1])
-                      + (corner_vals[6] - corner_vals[2])
-                      + (corner_vals[7] - corner_vals[3])) * 0.25
+                # Edge 12: center vertex (inverse-distance weighted avg, rare)
+                if need_edge12:
+                    wsum = 0.0
+                    vert_coords[12][0] = 0.0
+                    vert_coords[12][1] = 0.0
+                    vert_coords[12][2] = 0.0
+                    for e in range(8):
+                        w_e = corner_vals[e] - isovalue
+                        if w_e < 0:
+                            w_e = -w_e
+                        w_e = 1.0 / (LEW_EPS + w_e)
+                        vert_coords[12][0] += w_e * (mc_ox + mc_vsx * <float>(i + _VTX_DI[e]))
+                        vert_coords[12][1] += w_e * (mc_oy + mc_vsy * <float>(j + _VTX_DJ[e]))
+                        vert_coords[12][2] += w_e * (mc_oz + mc_vsz * <float>(k + _VTX_DK[e]))
+                        wsum += w_e
+                    if wsum > 0.0:
+                        vert_coords[12][0] /= wsum
+                        vert_coords[12][1] /= wsum
+                        vert_coords[12][2] /= wsum
 
-                # Emit triangles to STL buffer
+                # Emit triangles from edge_buf (Lewiner guarantees correct winding)
                 t_idx = 0
-                while tri_tbl[cube_idx, t_idx] != -1:
-                    ei0 = tri_tbl[cube_idx, t_idx]
-                    ei1 = tri_tbl[cube_idx, t_idx + 1]
-                    ei2 = tri_tbl[cube_idx, t_idx + 2]
+                while t_idx < n_edges:
+                    ei0 = edge_buf[t_idx]
+                    ei1 = edge_buf[t_idx + 1]
+                    ei2 = edge_buf[t_idx + 2]
 
                     buf_off = buf_count * 50
                     fptr = <float*>(&stl_buf[buf_off])
@@ -2322,15 +2531,7 @@ def fused_stl_export(
                     fptr[0] = uy * wz - uz * wy
                     fptr[1] = uz * wx - ux * wz
                     fptr[2] = ux * wy - uy * wx
-                    # Orient normal outward: gradient points INWARD (toward
-                    # positive/inside), so flip if normal aligns WITH gradient
-                    if (fptr[0]*gx + fptr[1]*gy + fptr[2]*gz) > 0.0:
-                        fptr[0] = -fptr[0]
-                        fptr[1] = -fptr[1]
-                        fptr[2] = -fptr[2]
-                        # Swap winding order so viewers derive correct orientation
-                        ei1, ei2 = ei2, ei1
-                    # Normalize
+                    # Normalize (no gradient flip — Lewiner winding is correct)
                     nn = sqrt(fptr[0]*fptr[0] + fptr[1]*fptr[1] + fptr[2]*fptr[2])
                     if nn > 0.0:
                         fptr[0] = fptr[0] / nn
