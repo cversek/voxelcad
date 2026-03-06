@@ -2568,6 +2568,8 @@ def fused_stl_export(
     cdef int conv_val
     cdef long long bit_idx
     cdef signed char src_val
+    cdef signed char center_val
+    cdef int center_sx, center_sy
     cdef int conv_k
 
     # Face-layer coordinate arrays for vertex dedup (NaN = not computed)
@@ -2693,26 +2695,60 @@ def fused_stl_export(
                 if pi == 0 or pi == px - 1 or pj == 0 or pj == py - 1:
                     slice_b[pi, pj] = -1
                 else:
-                    acc = 0
-                    for di in range(kx):
-                        for dj in range(ky):
-                            for dk in range(kz_dim):
-                                if kernel[di, dj, dk] == 0:
-                                    continue
-                                slab_fi = ((pi - 1) + di) * str_val
-                                slab_fj = ((pj - 1) + dj) * str_val
-                                src_val = slab_ptr[
-                                    dk_off[dk] +
-                                    slab_fi * slab_ry_dim + slab_fj]
-                                acc = acc + <short>(
-                                    <short>src_val *
-                                    <short>kernel[di, dj, dk])
-                    conv_val = <int>acc
-                    if conv_val > 127:
-                        conv_val = 127
-                    elif conv_val < -128:
-                        conv_val = -128
-                    slice_b[pi, pj] = <signed char>conv_val
+                    # OPT 13: 6-point axis probe — detect surface band
+                    center_sx = ((pi - 1) + krx) * str_val
+                    center_sy = ((pj - 1) + kry) * str_val
+                    center_val = slab_ptr[
+                        dk_off[krz] +
+                        center_sx * slab_ry_dim + center_sy]
+                    if (slab_ptr[dk_off[0] +
+                                 center_sx * slab_ry_dim + center_sy]
+                            != center_val
+                        or slab_ptr[dk_off[kz_dim - 1] +
+                                    center_sx * slab_ry_dim + center_sy]
+                            != center_val
+                        or slab_ptr[dk_off[krz] +
+                                    (pi - 1) * str_val * slab_ry_dim +
+                                    center_sy]
+                            != center_val
+                        or slab_ptr[dk_off[krz] +
+                                    ((pi - 1) + kx - 1) * str_val *
+                                    slab_ry_dim + center_sy]
+                            != center_val
+                        or slab_ptr[dk_off[krz] +
+                                    center_sx * slab_ry_dim +
+                                    (pj - 1) * str_val]
+                            != center_val
+                        or slab_ptr[dk_off[krz] +
+                                    center_sx * slab_ry_dim +
+                                    ((pj - 1) + ky - 1) * str_val]
+                            != center_val):
+                        # Surface band: full convolution
+                        acc = 0
+                        for di in range(kx):
+                            for dj in range(ky):
+                                for dk in range(kz_dim):
+                                    if kernel[di, dj, dk] == 0:
+                                        continue
+                                    slab_fi = ((pi - 1) + di) * str_val
+                                    slab_fj = ((pj - 1) + dj) * str_val
+                                    src_val = slab_ptr[
+                                        dk_off[dk] +
+                                        slab_fi * slab_ry_dim + slab_fj]
+                                    acc = acc + <short>(
+                                        <short>src_val *
+                                        <short>kernel[di, dj, dk])
+                        conv_val = <int>acc
+                        if conv_val > 127:
+                            conv_val = 127
+                        elif conv_val < -128:
+                            conv_val = -128
+                        slice_b[pi, pj] = <signed char>conv_val
+                    else:
+                        # Interior/exterior: branchless constant fill
+                        slice_b[pi, pj] = <signed char>(
+                            <int>center_val * 127 +
+                            (<int>center_val >> 7))
 
     # --- Init face-layer jump table ---
     # layer_jstride[L] = number of floats per i-row in layer L
@@ -2807,27 +2843,65 @@ def fused_stl_export(
                                     pj == 0 or pj == py - 1):
                                 slice_c[pi, pj] = -1
                             else:
-                                acc = 0
-                                for di in range(kx):
-                                    for dj in range(ky):
-                                        for dk in range(kz_dim):
-                                            if kernel[di, dj, dk] == 0:
-                                                continue
-                                            slab_fi = ((pi - 1) + di) * str_val
-                                            slab_fj = ((pj - 1) + dj) * str_val
-                                            src_val = slab_ptr[
-                                                dk_off[dk] +
-                                                slab_fi * slab_ry_dim +
-                                                slab_fj]
-                                            acc = acc + <short>(
-                                                <short>src_val *
-                                                <short>kernel[di, dj, dk])
-                                conv_val = <int>acc
-                                if conv_val > 127:
-                                    conv_val = 127
-                                elif conv_val < -128:
-                                    conv_val = -128
-                                slice_c[pi, pj] = <signed char>conv_val
+                                # OPT 13: 6-point axis probe
+                                center_sx = ((pi - 1) + krx) * str_val
+                                center_sy = ((pj - 1) + kry) * str_val
+                                center_val = slab_ptr[
+                                    dk_off[krz] +
+                                    center_sx * slab_ry_dim + center_sy]
+                                if (slab_ptr[dk_off[0] +
+                                             center_sx * slab_ry_dim +
+                                             center_sy]
+                                        != center_val
+                                    or slab_ptr[dk_off[kz_dim - 1] +
+                                                center_sx * slab_ry_dim +
+                                                center_sy]
+                                        != center_val
+                                    or slab_ptr[dk_off[krz] +
+                                                (pi - 1) * str_val *
+                                                slab_ry_dim + center_sy]
+                                        != center_val
+                                    or slab_ptr[dk_off[krz] +
+                                                ((pi - 1) + kx - 1) *
+                                                str_val * slab_ry_dim +
+                                                center_sy]
+                                        != center_val
+                                    or slab_ptr[dk_off[krz] +
+                                                center_sx * slab_ry_dim +
+                                                (pj - 1) * str_val]
+                                        != center_val
+                                    or slab_ptr[dk_off[krz] +
+                                                center_sx * slab_ry_dim +
+                                                ((pj - 1) + ky - 1) *
+                                                str_val]
+                                        != center_val):
+                                    # Surface band: full convolution
+                                    acc = 0
+                                    for di in range(kx):
+                                        for dj in range(ky):
+                                            for dk in range(kz_dim):
+                                                if kernel[di, dj, dk] == 0:
+                                                    continue
+                                                slab_fi = ((pi - 1) + di) * str_val
+                                                slab_fj = ((pj - 1) + dj) * str_val
+                                                src_val = slab_ptr[
+                                                    dk_off[dk] +
+                                                    slab_fi * slab_ry_dim +
+                                                    slab_fj]
+                                                acc = acc + <short>(
+                                                    <short>src_val *
+                                                    <short>kernel[di, dj, dk])
+                                    conv_val = <int>acc
+                                    if conv_val > 127:
+                                        conv_val = 127
+                                    elif conv_val < -128:
+                                        conv_val = -128
+                                    slice_c[pi, pj] = <signed char>conv_val
+                                else:
+                                    # Interior/exterior: branchless fill
+                                    slice_c[pi, pj] = <signed char>(
+                                        <int>center_val * 127 +
+                                        (<int>center_val >> 7))
 
         # Wait for MC to finish
         with nogil:
