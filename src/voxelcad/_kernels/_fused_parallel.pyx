@@ -65,6 +65,13 @@ ctypedef struct mc_args_t:
     int tri_count
     FILE *fp
     int BUF_MAX
+    # Sync primitives (OPT 10 pipeline)
+    pthread_mutex_t mutex
+    pthread_cond_t slice_ready
+    pthread_cond_t mc_done
+    int mc_go
+    int mc_finished
+    int terminate
 
 np.import_array()
 
@@ -2270,6 +2277,25 @@ cdef inline int _lew_copy_3d(
     return n
 
 
+cdef void* _mc_thread_func(void *arg) noexcept nogil:
+    cdef mc_args_t *a = <mc_args_t*>arg
+    while True:
+        pthread_mutex_lock(&a.mutex)
+        while a.mc_go == 0 and a.terminate == 0:
+            pthread_cond_wait(&a.slice_ready, &a.mutex)
+        if a.terminate != 0:
+            pthread_mutex_unlock(&a.mutex)
+            return NULL
+        a.mc_go = 0
+        pthread_mutex_unlock(&a.mutex)
+        _mc_process_layer(a)
+        pthread_mutex_lock(&a.mutex)
+        a.mc_finished = 1
+        pthread_cond_signal(&a.mc_done)
+        pthread_mutex_unlock(&a.mutex)
+    return NULL
+
+
 cdef void _mc_process_layer(mc_args_t *a) noexcept nogil:
     """Process one Z-layer of marching cubes, emitting triangles to STL buffer.
     Pure C — no Python objects, no GIL. All state via mc_args_t struct.
@@ -2524,8 +2550,10 @@ def fused_stl_export(
     # Two Z-slices of convolved output (int8)
     slice_a_np = np.full((px, py), -1, dtype=np.int8)
     slice_b_np = np.full((px, py), -1, dtype=np.int8)
+    slice_c_np = np.full((px, py), -1, dtype=np.int8)
     cdef signed char[:, ::1] slice_a = slice_a_np
     cdef signed char[:, ::1] slice_b = slice_b_np
+    cdef signed char[:, ::1] slice_c = slice_c_np
 
     # Source packed bits
     cdef const unsigned char *src_ptr = &packed[0]
@@ -2607,6 +2635,7 @@ def fused_stl_export(
     cdef int dk_off[64]  # precomputed slot_offset = slot * slab_slice_size
     cdef mc_args_t mc_args
     cdef int _l
+    cdef pthread_t mc_thread
 
     if n_threads <= 0:
         n_threads = _get_optimal_threads(px)
@@ -2719,39 +2748,36 @@ def fused_stl_export(
         mc_args.layer_ptrs[_l] = layer_ptrs[_l]
         mc_args.layer_jstride[_l] = layer_jstride[_l]
 
+    # --- OPT 10: Init pthread MC pipeline ---
+    mc_args.mc_go = 0
+    mc_args.mc_finished = 0
+    mc_args.terminate = 0
+    pthread_mutex_init(&mc_args.mutex, NULL)
+    pthread_cond_init(&mc_args.slice_ready, NULL)
+    pthread_cond_init(&mc_args.mc_done, NULL)
+    pthread_create(&mc_thread, NULL, _mc_thread_func, &mc_args)
+
     # --- Main Z-sweep: MC on slice pairs + STL write ---
     for k in range(pz - 1):
-        # MC via extracted nogil function (OPT 10 refactor)
         mc_args.k = k
         mc_args.slice_a = &slice_a[0, 0]
         mc_args.slice_b = &slice_b[0, 0]
+
+        # Signal MC thread to start processing current pair
         with nogil:
-            _mc_process_layer(&mc_args)
+            pthread_mutex_lock(&mc_args.mutex)
+            mc_args.mc_go = 1
+            mc_args.mc_finished = 0
+            pthread_cond_signal(&mc_args.slice_ready)
+            pthread_mutex_unlock(&mc_args.mutex)
 
-        # --- Advance Z-slices and face layers ---
-        slice_a_np, slice_b_np = slice_b_np, slice_a_np
-        slice_a = slice_a_np
-        slice_b = slice_b_np
-
-        # Swap face layers via C pointer swap (no Python refcounting).
-        # lax(0) ↔ lbx(2), lay(1) ↔ lby(3). zed(4) stays, just reset.
-        # Uses mc_args.layer_ptrs — canonical copy for _mc_process_layer.
-        tmp_ptr = mc_args.layer_ptrs[0]; mc_args.layer_ptrs[0] = mc_args.layer_ptrs[2]; mc_args.layer_ptrs[2] = tmp_ptr
-        tmp_ptr = mc_args.layer_ptrs[1]; mc_args.layer_ptrs[1] = mc_args.layer_ptrs[3]; mc_args.layer_ptrs[3] = tmp_ptr
-        # Reset new top layers + z-edges with NaN via 0xFF memset
-        memset(mc_args.layer_ptrs[2], 0xFF, (px - 1) * py * 3 * sizeof(float))
-        memset(mc_args.layer_ptrs[3], 0xFF, px * (py - 1) * 3 * sizeof(float))
-        memset(mc_args.layer_ptrs[4], 0xFF, px * py * 3 * sizeof(float))
-
+        # Conv next slice into slice_c while MC runs (overlap)
         if k + 2 < pz:
-            # Compute next convolved Z-slice into slice_b
             if k + 2 >= pz - 1:
-                # Last slice = padding
-                slice_b_np[:] = -1
-                slice_b = slice_b_np
+                slice_c_np[:] = -1
+                slice_c = slice_c_np
             else:
-                # OPT 9: Advance slab — evict oldest, extract new Z-slice
-                conv_k = k + 2 - 1  # strided Z
+                conv_k = k + 2 - 1
                 evict_slot = (conv_k - 1) % kz_dim
                 memset(slab_ptr + evict_slot * slab_slice_size,
                        0xFF, slab_slice_size)
@@ -2771,19 +2797,15 @@ def fused_stl_export(
                                         evict_slot * slab_slice_size +
                                         (xi + pad_x) * slab_ry_dim +
                                         (yi + pad_y)] = 1
-
-                # Precompute slot offsets for this conv_k
                 for dk in range(kz_dim):
                     dk_off[dk] = ((conv_k + dk) % kz_dim) * slab_slice_size
-
-                # Compute slice_b using slab
                 with nogil:
                     for pi in prange(px, num_threads=n_threads,
                                      schedule='static'):
                         for pj in range(py):
                             if (pi == 0 or pi == px - 1 or
                                     pj == 0 or pj == py - 1):
-                                slice_b[pi, pj] = -1
+                                slice_c[pi, pj] = -1
                             else:
                                 acc = 0
                                 for di in range(kx):
@@ -2805,7 +2827,41 @@ def fused_stl_export(
                                     conv_val = 127
                                 elif conv_val < -128:
                                     conv_val = -128
-                                slice_b[pi, pj] = <signed char>conv_val
+                                slice_c[pi, pj] = <signed char>conv_val
+
+        # Wait for MC to finish
+        with nogil:
+            pthread_mutex_lock(&mc_args.mutex)
+            while mc_args.mc_finished == 0:
+                pthread_cond_wait(&mc_args.mc_done, &mc_args.mutex)
+            pthread_mutex_unlock(&mc_args.mutex)
+
+        # Rotate: b->a (next bottom), c->b (next top), a->c (free)
+        temp_np = slice_a_np
+        slice_a_np = slice_b_np
+        slice_b_np = slice_c_np
+        slice_c_np = temp_np
+        slice_a = slice_a_np
+        slice_b = slice_b_np
+        slice_c = slice_c_np
+
+        # Swap face layers (after MC done)
+        tmp_ptr = mc_args.layer_ptrs[0]; mc_args.layer_ptrs[0] = mc_args.layer_ptrs[2]; mc_args.layer_ptrs[2] = tmp_ptr
+        tmp_ptr = mc_args.layer_ptrs[1]; mc_args.layer_ptrs[1] = mc_args.layer_ptrs[3]; mc_args.layer_ptrs[3] = tmp_ptr
+        memset(mc_args.layer_ptrs[2], 0xFF, (px - 1) * py * 3 * sizeof(float))
+        memset(mc_args.layer_ptrs[3], 0xFF, px * (py - 1) * 3 * sizeof(float))
+        memset(mc_args.layer_ptrs[4], 0xFF, px * py * 3 * sizeof(float))
+
+    # --- Teardown pthread ---
+    with nogil:
+        pthread_mutex_lock(&mc_args.mutex)
+        mc_args.terminate = 1
+        pthread_cond_signal(&mc_args.slice_ready)
+        pthread_mutex_unlock(&mc_args.mutex)
+        pthread_join(mc_thread, NULL)
+        pthread_mutex_destroy(&mc_args.mutex)
+        pthread_cond_destroy(&mc_args.slice_ready)
+        pthread_cond_destroy(&mc_args.mc_done)
 
     # Flush remaining buffer
     if mc_args.buf_count > 0:
