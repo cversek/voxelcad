@@ -46,6 +46,8 @@ cdef extern from "pthread.h" nogil:
 ctypedef struct mc_args_t:
     signed char *slice_a
     signed char *slice_b
+    signed char *band_a
+    signed char *band_b
     int px
     int py
     int k
@@ -2350,8 +2352,21 @@ cdef void _mc_process_layer(mc_args_t *a) noexcept nogil:
     cdef float mc_vsy = a.mc_vsy
     cdef float mc_vsz = a.mc_vsz
 
+    cdef signed char *ba = a.band_a
+    cdef signed char *bb = a.band_b
+
     for j in range(py - 1):
         for i in range(px - 1):
+            # OPT 15: Skip cells where all 8 corners are non-surface
+            if (ba[i * py + j] == 0 and ba[(i + 1) * py + j] == 0
+                    and ba[i * py + (j + 1)] == 0
+                    and ba[(i + 1) * py + (j + 1)] == 0
+                    and bb[i * py + j] == 0
+                    and bb[(i + 1) * py + j] == 0
+                    and bb[i * py + (j + 1)] == 0
+                    and bb[(i + 1) * py + (j + 1)] == 0):
+                continue
+
             corner_vals[0] = <float>sa[i * py + j]
             corner_vals[1] = <float>sa[(i + 1) * py + j]
             corner_vals[2] = <float>sa[(i + 1) * py + (j + 1)]
@@ -2572,6 +2587,14 @@ def fused_stl_export(
     cdef signed char[:, ::1] slice_b = slice_b_np
     cdef signed char[:, ::1] slice_c = slice_c_np
 
+    # OPT 15: Surface band mask (conv→MC skip)
+    band_a_np = np.zeros((px, py), dtype=np.int8)
+    band_b_np = np.zeros((px, py), dtype=np.int8)
+    band_c_np = np.zeros((px, py), dtype=np.int8)
+    cdef signed char[:, ::1] band_a = band_a_np
+    cdef signed char[:, ::1] band_b = band_b_np
+    cdef signed char[:, ::1] band_c = band_c_np
+
     # Source packed bits
     cdef const unsigned char *src_ptr = &packed[0]
     cdef long long rx_ll = rx
@@ -2761,11 +2784,13 @@ def fused_stl_export(
                         elif conv_val < -128:
                             conv_val = -128
                         slice_b[pi, pj] = <signed char>conv_val
+                        band_b[pi, pj] = 1  # OPT 15: surface
                     else:
                         # Interior/exterior: branchless constant fill
                         slice_b[pi, pj] = <signed char>(
                             <int>center_val * 127 +
                             (<int>center_val >> 7))
+                        band_b[pi, pj] = 0  # OPT 15: non-surface
 
     # --- Init face-layer jump table ---
     # layer_jstride[L] = number of floats per i-row in layer L
@@ -2815,6 +2840,8 @@ def fused_stl_export(
         mc_args.k = k
         mc_args.slice_a = &slice_a[0, 0]
         mc_args.slice_b = &slice_b[0, 0]
+        mc_args.band_a = &band_a[0, 0]
+        mc_args.band_b = &band_b[0, 0]
 
         # Signal MC thread to start processing current pair
         with nogil:
@@ -2829,6 +2856,8 @@ def fused_stl_export(
             if k + 2 >= pz - 1:
                 slice_c_np[:] = -1
                 slice_c = slice_c_np
+                band_c_np[:] = 0  # OPT 15: boundary slice has no surface
+                band_c = band_c_np
             else:
                 conv_k = k + 2 - 1
                 evict_slot = (conv_k - 1) % kz_dim
@@ -2914,11 +2943,13 @@ def fused_stl_export(
                                     elif conv_val < -128:
                                         conv_val = -128
                                     slice_c[pi, pj] = <signed char>conv_val
+                                    band_c[pi, pj] = 1  # OPT 15: surface
                                 else:
                                     # Interior/exterior: branchless fill
                                     slice_c[pi, pj] = <signed char>(
                                         <int>center_val * 127 +
                                         (<int>center_val >> 7))
+                                    band_c[pi, pj] = 0  # OPT 15: non-surface
 
         # Wait for MC to finish
         with nogil:
@@ -2935,6 +2966,15 @@ def fused_stl_export(
         slice_a = slice_a_np
         slice_b = slice_b_np
         slice_c = slice_c_np
+
+        # OPT 15: Rotate band arrays in sync with slices
+        temp_np = band_a_np
+        band_a_np = band_b_np
+        band_b_np = band_c_np
+        band_c_np = temp_np
+        band_a = band_a_np
+        band_b = band_b_np
+        band_c = band_c_np
 
         # Swap face layers (after MC done)
         tmp_ptr = mc_args.layer_ptrs[0]; mc_args.layer_ptrs[0] = mc_args.layer_ptrs[2]; mc_args.layer_ptrs[2] = tmp_ptr
