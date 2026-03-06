@@ -2383,6 +2383,20 @@ def fused_stl_export(
     cdef int buf_off
     cdef int ei0, ei1, ei2
 
+    # OPT 9: Slab buffer variables (amortize bit extraction)
+    cdef int pad_x = krx * str_val
+    cdef int pad_y = kry * str_val
+    cdef int slab_rx_dim = <int>rx + 2 * pad_x
+    cdef int slab_ry_dim = <int>ry + 2 * pad_y
+    cdef int slab_slice_size = slab_rx_dim * slab_ry_dim
+    cdef int slab_slot, slab_fi, slab_fj
+    cdef int new_src_z, evict_slot
+    cdef signed char *slab_ptr
+    cdef int xi, yi
+    cdef int src_z
+    cdef long long slab_bit_idx
+    cdef int dk_off[64]  # precomputed slot_offset = slot * slab_slice_size
+
     if n_threads <= 0:
         n_threads = _get_optimal_threads(px)
 
@@ -2403,9 +2417,36 @@ def fused_stl_export(
         c_header[hi] = <unsigned char>hdr_str[hi]
     fwrite(c_header, 1, 84, fp)
 
-    # --- Compute initial slice_b (z=1) ---
-    # slice_a (z=0) is already all -1 (padding)
-    conv_k = 0  # strided Z for pk=1
+    # --- OPT 9: Allocate slab buffer and extract initial Z-slices ---
+    # Circular buffer of kz_dim int8 Z-slices, padded in X/Y to eliminate
+    # bounds checks. Pre-filled with -1 (outside = -1 convention).
+    slab_np = np.full((kz_dim, slab_rx_dim, slab_ry_dim), -1, dtype=np.int8)
+    cdef signed char[:, :, ::1] slab_view = slab_np
+    slab_ptr = &slab_view[0, 0, 0]
+
+    # Extract initial kz_dim source Z-slices into slab
+    conv_k = 0
+    for dk in range(kz_dim):
+        src_z = (conv_k + dk - krz) * str_val
+        if src_z < 0 or src_z >= <int>rz:
+            continue  # slot stays -1 (padding)
+        slab_slot = (conv_k + dk) % kz_dim
+        with nogil:
+            for xi in prange(<int>rx, num_threads=n_threads, schedule='static'):
+                for yi in range(<int>ry):
+                    slab_bit_idx = (
+                        <long long>xi +
+                        <long long>yi * rx_ll +
+                        <long long>src_z * rxy)
+                    if (src_ptr[slab_bit_idx >> 3] >>
+                            (7 - <int>(slab_bit_idx & 7))) & 1:
+                        slab_ptr[slab_slot * slab_slice_size +
+                                 (xi + pad_x) * slab_ry_dim + (yi + pad_y)] = 1
+
+    # --- Compute initial slice_b (z=1) using slab ---
+    # Precompute slot offsets to eliminate modulo from inner loop
+    for dk in range(kz_dim):
+        dk_off[dk] = ((conv_k + dk) % kz_dim) * slab_slice_size
     with nogil:
         for pi in prange(px, num_threads=n_threads, schedule='static'):
             for pj in range(py):
@@ -2414,30 +2455,15 @@ def fused_stl_export(
                 else:
                     acc = 0
                     for di in range(kx):
-                        s_i = (pi - 1) + di - krx
                         for dj in range(ky):
-                            s_j = (pj - 1) + dj - kry
                             for dk in range(kz_dim):
                                 if kernel[di, dj, dk] == 0:
                                     continue
-                                s_k = conv_k + dk - krz
-                                f_i = s_i * str_val
-                                f_j = s_j * str_val
-                                f_k = s_k * str_val
-                                if (f_i < 0 or f_i >= <int>rx or
-                                        f_j < 0 or f_j >= <int>ry or
-                                        f_k < 0 or f_k >= <int>rz):
-                                    src_val = -1
-                                else:
-                                    bit_idx = (
-                                        <long long>f_i +
-                                        <long long>f_j * rx_ll +
-                                        <long long>f_k * rxy)
-                                    if (src_ptr[bit_idx >> 3] >>
-                                            (7 - <int>(bit_idx & 7))) & 1:
-                                        src_val = 1
-                                    else:
-                                        src_val = -1
+                                slab_fi = ((pi - 1) + di) * str_val
+                                slab_fj = ((pj - 1) + dj) * str_val
+                                src_val = slab_ptr[
+                                    dk_off[dk] +
+                                    slab_fi * slab_ry_dim + slab_fj]
                                 acc = acc + <short>(
                                     <short>src_val *
                                     <short>kernel[di, dj, dk])
@@ -2642,7 +2668,33 @@ def fused_stl_export(
                 slice_b_np[:] = -1
                 slice_b = slice_b_np
             else:
+                # OPT 9: Advance slab — evict oldest, extract new Z-slice
                 conv_k = k + 2 - 1  # strided Z
+                evict_slot = (conv_k - 1) % kz_dim
+                memset(slab_ptr + evict_slot * slab_slice_size,
+                       0xFF, slab_slice_size)
+                new_src_z = (conv_k + krz) * str_val
+                if new_src_z >= 0 and new_src_z < <int>rz:
+                    with nogil:
+                        for xi in prange(<int>rx, num_threads=n_threads,
+                                         schedule='static'):
+                            for yi in range(<int>ry):
+                                slab_bit_idx = (
+                                    <long long>xi +
+                                    <long long>yi * rx_ll +
+                                    <long long>new_src_z * rxy)
+                                if (src_ptr[slab_bit_idx >> 3] >>
+                                        (7 - <int>(slab_bit_idx & 7))) & 1:
+                                    slab_ptr[
+                                        evict_slot * slab_slice_size +
+                                        (xi + pad_x) * slab_ry_dim +
+                                        (yi + pad_y)] = 1
+
+                # Precompute slot offsets for this conv_k
+                for dk in range(kz_dim):
+                    dk_off[dk] = ((conv_k + dk) % kz_dim) * slab_slice_size
+
+                # Compute slice_b using slab
                 with nogil:
                     for pi in prange(px, num_threads=n_threads,
                                      schedule='static'):
@@ -2653,31 +2705,16 @@ def fused_stl_export(
                             else:
                                 acc = 0
                                 for di in range(kx):
-                                    s_i = (pi - 1) + di - krx
                                     for dj in range(ky):
-                                        s_j = (pj - 1) + dj - kry
                                         for dk in range(kz_dim):
                                             if kernel[di, dj, dk] == 0:
                                                 continue
-                                            s_k = conv_k + dk - krz
-                                            f_i = s_i * str_val
-                                            f_j = s_j * str_val
-                                            f_k = s_k * str_val
-                                            if (f_i < 0 or f_i >= <int>rx or
-                                                    f_j < 0 or f_j >= <int>ry or
-                                                    f_k < 0 or f_k >= <int>rz):
-                                                src_val = -1
-                                            else:
-                                                bit_idx = (
-                                                    <long long>f_i +
-                                                    <long long>f_j * rx_ll +
-                                                    <long long>f_k * rxy)
-                                                if (src_ptr[bit_idx >> 3] >>
-                                                        (7 - <int>(bit_idx & 7))
-                                                        ) & 1:
-                                                    src_val = 1
-                                                else:
-                                                    src_val = -1
+                                            slab_fi = ((pi - 1) + di) * str_val
+                                            slab_fj = ((pj - 1) + dj) * str_val
+                                            src_val = slab_ptr[
+                                                dk_off[dk] +
+                                                slab_fi * slab_ry_dim +
+                                                slab_fj]
                                             acc = acc + <short>(
                                                 <short>src_val *
                                                 <short>kernel[di, dj, dk])
