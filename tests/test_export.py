@@ -134,7 +134,7 @@ class TestWindingConsistency:
     def test_sphere_normals_point_outward(self, sphere, tmp_path):
         """For a sphere, normals should point away from mesh center."""
         fname = str(tmp_path / "winding.stl")
-        sphere.export(fname, method='fast_smooth')
+        sphere.export(fname, method='fast_smooth', compute_normals=True)
         normals, centroids = self._read_stl_normals_and_verts(fname)
         # Use mesh center — sphere grid origin is not at (0,0,0)
         mesh_center = centroids.mean(axis=0)
@@ -148,7 +148,7 @@ class TestWindingConsistency:
     def test_sphere_normals_consistent_winding(self, sphere, tmp_path):
         """Cross-product normal should match stored STL normal direction."""
         fname = str(tmp_path / "winding2.stl")
-        sphere.export(fname, method='fast_smooth')
+        sphere.export(fname, method='fast_smooth', compute_normals=True)
         with open(fname, 'rb') as f:
             f.seek(80)
             n_tri = struct.unpack('<I', f.read(4))[0]
@@ -214,7 +214,7 @@ class TestWindingAllGeometries:
         """Convex primitives: all normals should point away from mesh center."""
         m = model_fn(self.VS)
         fname = str(tmp_path / f"{name}.stl")
-        m.export(fname, method='fast_smooth')
+        m.export(fname, method='fast_smooth', compute_normals=True)
         pct = _radial_outward_pct(fname)
         assert pct > 99.0, f"{name}: only {pct:.1f}% outward (expect >99%)"
 
@@ -229,7 +229,7 @@ class TestWindingAllGeometries:
         """All geometries: signed volume must be positive (outward normals)."""
         m = model_fn(self.VS)
         fname = str(tmp_path / f"{name}.stl")
-        m.export(fname, method='fast_smooth')
+        m.export(fname, method='fast_smooth', compute_normals=True)
         _, v0, v1, v2 = _read_stl_fast(fname)
         vol = _signed_volume(v0, v1, v2)
         assert vol > 0, f"{name}: signed volume {vol:.1f} <= 0 (expect positive)"
@@ -238,7 +238,7 @@ class TestWindingAllGeometries:
         """Stride=2 should also produce correct winding."""
         s = Sphere(r=5, voxel_size=self.VS)
         fname = str(tmp_path / "sphere_s2.stl")
-        s.export(fname, method='fast_smooth', mc_stride=2)
+        s.export(fname, method='fast_smooth', mc_stride=2, compute_normals=True)
         pct = _radial_outward_pct(fname)
         assert pct > 99.0, f"Stride=2: only {pct:.1f}% outward"
 

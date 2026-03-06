@@ -20,7 +20,7 @@ from libc.math cimport cos, sin, fabs, sqrt, pow as cpow
 from libc.stdio cimport fopen, fwrite, fseek, fclose, FILE, SEEK_SET, fprintf, stderr
 from libc.string cimport memset
 from libc.stdlib cimport malloc, free
-from cython.parallel cimport prange
+from cython.parallel cimport prange, threadid
 
 # pthread declarations for pipeline overlap (OPT 10)
 cdef extern from "pthread.h" nogil:
@@ -74,6 +74,11 @@ ctypedef struct mc_args_t:
     int mc_go
     int mc_finished
     int terminate
+    # OPT 17: Normal elision flag (0 = zero normals, 1 = compute normals)
+    int compute_normals
+    # OPT 16: Two-pass parallel MC
+    int mc_n_threads
+    pthread_mutex_t write_mutex
 
 np.import_array()
 
@@ -2327,6 +2332,7 @@ cdef void _mc_process_layer(mc_args_t *a) noexcept nogil:
     cdef float v0_val, v1_val, t_interp
     cdef int v0_idx, v1_idx
     cdef float vx
+    # OPT 17: Normal computation variables (only used when compute_normals=1)
     cdef float ux, uy, uz, wx, wy, wz, nn
     cdef signed char edge_buf[36]
     cdef int n_edges, need_edge12
@@ -2355,8 +2361,10 @@ cdef void _mc_process_layer(mc_args_t *a) noexcept nogil:
     cdef signed char *ba = a.band_a
     cdef signed char *bb = a.band_b
 
-    for j in range(py - 1):
-        for i in range(px - 1):
+    # OPT 18: i-outer, j-inner for cache-friendly face-layer access
+    # (j varies fast → stride-3 floats = 12 bytes, vs old stride py*12 bytes)
+    for i in range(px - 1):
+        for j in range(py - 1):
             # OPT 15: Skip cells where all 8 corners are non-surface
             if (ba[i * py + j] == 0 and ba[(i + 1) * py + j] == 0
                     and ba[i * py + (j + 1)] == 0
@@ -2459,20 +2467,26 @@ cdef void _mc_process_layer(mc_args_t *a) noexcept nogil:
                 ei2 = edge_buf[t_idx + 1]
                 buf_off = a.buf_count * 50
                 fptr = <float*>(&a.stl_buf[buf_off])
-                ux = vert_coords[ei1][0] - vert_coords[ei0][0]
-                uy = vert_coords[ei1][1] - vert_coords[ei0][1]
-                uz = vert_coords[ei1][2] - vert_coords[ei0][2]
-                wx = vert_coords[ei2][0] - vert_coords[ei0][0]
-                wy = vert_coords[ei2][1] - vert_coords[ei0][1]
-                wz = vert_coords[ei2][2] - vert_coords[ei0][2]
-                fptr[0] = uy * wz - uz * wy
-                fptr[1] = uz * wx - ux * wz
-                fptr[2] = ux * wy - uy * wx
-                nn = sqrt(fptr[0]*fptr[0] + fptr[1]*fptr[1] + fptr[2]*fptr[2])
-                if nn > 0.0:
-                    fptr[0] = fptr[0] / nn
-                    fptr[1] = fptr[1] / nn
-                    fptr[2] = fptr[2] / nn
+                # OPT 17: Skip normal computation unless explicitly requested
+                if a.compute_normals:
+                    ux = vert_coords[ei1][0] - vert_coords[ei0][0]
+                    uy = vert_coords[ei1][1] - vert_coords[ei0][1]
+                    uz = vert_coords[ei1][2] - vert_coords[ei0][2]
+                    wx = vert_coords[ei2][0] - vert_coords[ei0][0]
+                    wy = vert_coords[ei2][1] - vert_coords[ei0][1]
+                    wz = vert_coords[ei2][2] - vert_coords[ei0][2]
+                    fptr[0] = uy * wz - uz * wy
+                    fptr[1] = uz * wx - ux * wz
+                    fptr[2] = ux * wy - uy * wx
+                    nn = sqrt(fptr[0]*fptr[0] + fptr[1]*fptr[1] + fptr[2]*fptr[2])
+                    if nn > 0.0:
+                        fptr[0] = fptr[0] / nn
+                        fptr[1] = fptr[1] / nn
+                        fptr[2] = fptr[2] / nn
+                else:
+                    fptr[0] = 0.0
+                    fptr[1] = 0.0
+                    fptr[2] = 0.0
                 fptr[3] = vert_coords[ei0][0]
                 fptr[4] = vert_coords[ei0][1]
                 fptr[5] = vert_coords[ei0][2]
@@ -2492,6 +2506,317 @@ cdef void _mc_process_layer(mc_args_t *a) noexcept nogil:
                     a.buf_count = 0
 
 
+# ---------------------------------------------------------------------------
+# OPT 16: Two-pass parallel MC — face-layer dedup preserved
+# ---------------------------------------------------------------------------
+
+cdef void _precompute_layer_edges(mc_args_t *a, int compute_bottom) noexcept nogil:
+    """Pass 1: Pre-compute all edge vertices for this Z-layer into face-layer arrays.
+    Each face-layer position is written by exactly one thread — no races.
+    For k>0, bottom-face edges (lax/lay) come from previous layer's swap.
+    """
+    cdef int i, j, off
+    cdef float v0, v1, t, iso
+    cdef float ox, oy, oz, vsx, vsy, vsz
+    cdef int py_val = a.py
+    cdef int px_val = a.px
+    cdef int k = a.k
+    cdef signed char *sa = a.slice_a
+    cdef signed char *sb = a.slice_b
+    cdef float *lax_p = a.layer_ptrs[0]
+    cdef float *lay_p = a.layer_ptrs[1]
+    cdef float *lbx_p = a.layer_ptrs[2]
+    cdef float *lby_p = a.layer_ptrs[3]
+    cdef float *zed_p = a.layer_ptrs[4]
+    cdef int lax_js = a.layer_jstride[0]
+    cdef int lay_js = a.layer_jstride[1]
+    cdef int lbx_js = a.layer_jstride[2]
+    cdef int lby_js = a.layer_jstride[3]
+    cdef int zed_js = a.layer_jstride[4]
+    cdef int n_t = a.mc_n_threads
+
+    iso = a.isovalue
+    ox = a.mc_ox; oy = a.mc_oy; oz = a.mc_oz
+    vsx = a.mc_vsx; vsy = a.mc_vsy; vsz = a.mc_vsz
+
+    if compute_bottom:
+        # Bottom X-edges: lax[i,j] = edge (i,j,k)-(i+1,j,k) on slice_a
+        for i in prange(px_val - 1, num_threads=n_t, nogil=True):
+            for j in range(py_val):
+                v0 = <float>sa[i * py_val + j]
+                v1 = <float>sa[(i + 1) * py_val + j]
+                if (v0 > iso) != (v1 > iso):
+                    if v0 == v1:
+                        t = 0.5
+                    else:
+                        t = (iso - v0) / (v1 - v0)
+                    off = i * lax_js + j * 3
+                    lax_p[off] = ox + vsx * (<float>i + t)
+                    lax_p[off + 1] = oy + vsy * <float>j
+                    lax_p[off + 2] = oz + vsz * <float>k
+
+        # Bottom Y-edges: lay[i,j] = edge (i,j,k)-(i,j+1,k) on slice_a
+        for i in prange(px_val, num_threads=n_t, nogil=True):
+            for j in range(py_val - 1):
+                v0 = <float>sa[i * py_val + j]
+                v1 = <float>sa[i * py_val + (j + 1)]
+                if (v0 > iso) != (v1 > iso):
+                    if v0 == v1:
+                        t = 0.5
+                    else:
+                        t = (iso - v0) / (v1 - v0)
+                    off = i * lay_js + j * 3
+                    lay_p[off] = ox + vsx * <float>i
+                    lay_p[off + 1] = oy + vsy * (<float>j + t)
+                    lay_p[off + 2] = oz + vsz * <float>k
+
+    # Top X-edges: lbx[i,j] = edge (i,j,k+1)-(i+1,j,k+1) on slice_b
+    for i in prange(px_val - 1, num_threads=n_t, nogil=True):
+        for j in range(py_val):
+            v0 = <float>sb[i * py_val + j]
+            v1 = <float>sb[(i + 1) * py_val + j]
+            if (v0 > iso) != (v1 > iso):
+                if v0 == v1:
+                    t = 0.5
+                else:
+                    t = (iso - v0) / (v1 - v0)
+                off = i * lbx_js + j * 3
+                lbx_p[off] = ox + vsx * (<float>i + t)
+                lbx_p[off + 1] = oy + vsy * <float>j
+                lbx_p[off + 2] = oz + vsz * <float>(k + 1)
+
+    # Top Y-edges: lby[i,j] = edge (i,j,k+1)-(i,j+1,k+1) on slice_b
+    for i in prange(px_val, num_threads=n_t, nogil=True):
+        for j in range(py_val - 1):
+            v0 = <float>sb[i * py_val + j]
+            v1 = <float>sb[i * py_val + (j + 1)]
+            if (v0 > iso) != (v1 > iso):
+                if v0 == v1:
+                    t = 0.5
+                else:
+                    t = (iso - v0) / (v1 - v0)
+                off = i * lby_js + j * 3
+                lby_p[off] = ox + vsx * <float>i
+                lby_p[off + 1] = oy + vsy * (<float>j + t)
+                lby_p[off + 2] = oz + vsz * <float>(k + 1)
+
+    # Z-edges: zed[i,j] = edge (i,j,k)-(i,j,k+1) between slices
+    for i in prange(px_val, num_threads=n_t, nogil=True):
+        for j in range(py_val):
+            v0 = <float>sa[i * py_val + j]
+            v1 = <float>sb[i * py_val + j]
+            if (v0 > iso) != (v1 > iso):
+                if v0 == v1:
+                    t = 0.5
+                else:
+                    t = (iso - v0) / (v1 - v0)
+                off = i * zed_js + j * 3
+                zed_p[off] = ox + vsx * <float>i
+                zed_p[off + 1] = oy + vsy * <float>j
+                zed_p[off + 2] = oz + vsz * (<float>k + t)
+
+
+cdef int _mc_emit_cell(mc_args_t *a, int i, int j,
+                        unsigned char *buf, int buf_start) noexcept nogil:
+    """Process one MC cell: read pre-computed edges from face-layers, emit triangles.
+    Returns number of triangles written to buf starting at buf_start * 50.
+    Stack-local arrays ensure thread safety when called from prange.
+    """
+    cdef float corner_vals[8]
+    cdef float vert_coords[13][3]
+    cdef signed char edge_buf[36]
+    cdef int cube_idx, n_edges, need_edge12, t_idx, e
+    cdef unsigned short edges_mask
+    cdef int fl_li, fl_off
+    cdef float *fl_p
+    cdef float w_e, wsum
+    cdef int ei0, ei1, ei2, buf_off
+    cdef float *fptr
+    cdef unsigned short *up
+    cdef float ux, uy, uz, wx, wy, wz, nn
+    cdef int py = a.py
+    cdef int k = a.k
+    cdef signed char *sa = a.slice_a
+    cdef signed char *sb = a.slice_b
+    cdef signed char *ft = a.ft
+    cdef int ft_ncols = a.ft_ncols
+    cdef float isovalue = a.isovalue
+    cdef float mc_ox = a.mc_ox, mc_oy = a.mc_oy, mc_oz = a.mc_oz
+    cdef float mc_vsx = a.mc_vsx, mc_vsy = a.mc_vsy, mc_vsz = a.mc_vsz
+    cdef int n_tris = 0
+
+    corner_vals[0] = <float>sa[i * py + j]
+    corner_vals[1] = <float>sa[(i + 1) * py + j]
+    corner_vals[2] = <float>sa[(i + 1) * py + (j + 1)]
+    corner_vals[3] = <float>sa[i * py + (j + 1)]
+    corner_vals[4] = <float>sb[i * py + j]
+    corner_vals[5] = <float>sb[(i + 1) * py + j]
+    corner_vals[6] = <float>sb[(i + 1) * py + (j + 1)]
+    corner_vals[7] = <float>sb[i * py + (j + 1)]
+
+    cube_idx = 0
+    if corner_vals[0] > isovalue: cube_idx |= 1
+    if corner_vals[1] > isovalue: cube_idx |= 2
+    if corner_vals[2] > isovalue: cube_idx |= 4
+    if corner_vals[3] > isovalue: cube_idx |= 8
+    if corner_vals[4] > isovalue: cube_idx |= 16
+    if corner_vals[5] > isovalue: cube_idx |= 32
+    if corner_vals[6] > isovalue: cube_idx |= 64
+    if corner_vals[7] > isovalue: cube_idx |= 128
+
+    n_edges = ft[cube_idx * ft_ncols]
+    if n_edges == 0:
+        return 0
+
+    edges_mask = 0
+    need_edge12 = 0
+    for t_idx in range(n_edges):
+        edge_buf[t_idx] = ft[cube_idx * ft_ncols + 1 + t_idx]
+        if edge_buf[t_idx] == 12:
+            need_edge12 = 1
+        elif 0 <= edge_buf[t_idx] < 12:
+            edges_mask |= <unsigned short>(1 << edge_buf[t_idx])
+
+    # Read pre-computed edge vertices from face-layers (no NaN check)
+    for e in range(12):
+        if not (edges_mask & (1 << e)):
+            continue
+        fl_li = _EDGE_LAYER[e]
+        fl_p = a.layer_ptrs[fl_li]
+        fl_off = ((i + _EDGE_DI_OFF[e]) * a.layer_jstride[fl_li]
+                  + (j + _EDGE_DJ_OFF[e]) * 3)
+        vert_coords[e][0] = fl_p[fl_off]
+        vert_coords[e][1] = fl_p[fl_off + 1]
+        vert_coords[e][2] = fl_p[fl_off + 2]
+
+    # Edge 12: center vertex (cell-local, unchanged from sequential)
+    if need_edge12:
+        wsum = 0.0
+        vert_coords[12][0] = 0.0
+        vert_coords[12][1] = 0.0
+        vert_coords[12][2] = 0.0
+        for e in range(8):
+            w_e = corner_vals[e] - isovalue
+            if w_e < 0:
+                w_e = -w_e
+            w_e = 1.0 / (LEW_EPS + w_e)
+            vert_coords[12][0] += w_e * (mc_ox + mc_vsx * <float>(i + _VTX_DI[e]))
+            vert_coords[12][1] += w_e * (mc_oy + mc_vsy * <float>(j + _VTX_DJ[e]))
+            vert_coords[12][2] += w_e * (mc_oz + mc_vsz * <float>(k + _VTX_DK[e]))
+            wsum += w_e
+        if wsum > 0.0:
+            vert_coords[12][0] /= wsum
+            vert_coords[12][1] /= wsum
+            vert_coords[12][2] /= wsum
+
+    # Assemble triangles — ei1/ei2 swap for outward normals (identical to sequential)
+    t_idx = 0
+    while t_idx < n_edges:
+        ei0 = edge_buf[t_idx]
+        ei1 = edge_buf[t_idx + 2]
+        ei2 = edge_buf[t_idx + 1]
+        buf_off = (buf_start + n_tris) * 50
+        fptr = <float*>(&buf[buf_off])
+        ux = vert_coords[ei1][0] - vert_coords[ei0][0]
+        uy = vert_coords[ei1][1] - vert_coords[ei0][1]
+        uz = vert_coords[ei1][2] - vert_coords[ei0][2]
+        wx = vert_coords[ei2][0] - vert_coords[ei0][0]
+        wy = vert_coords[ei2][1] - vert_coords[ei0][1]
+        wz = vert_coords[ei2][2] - vert_coords[ei0][2]
+        fptr[0] = uy * wz - uz * wy
+        fptr[1] = uz * wx - ux * wz
+        fptr[2] = ux * wy - uy * wx
+        nn = sqrt(fptr[0]*fptr[0] + fptr[1]*fptr[1] + fptr[2]*fptr[2])
+        if nn > 0.0:
+            fptr[0] = fptr[0] / nn
+            fptr[1] = fptr[1] / nn
+            fptr[2] = fptr[2] / nn
+        fptr[3] = vert_coords[ei0][0]
+        fptr[4] = vert_coords[ei0][1]
+        fptr[5] = vert_coords[ei0][2]
+        fptr[6] = vert_coords[ei1][0]
+        fptr[7] = vert_coords[ei1][1]
+        fptr[8] = vert_coords[ei1][2]
+        fptr[9] = vert_coords[ei2][0]
+        fptr[10] = vert_coords[ei2][1]
+        fptr[11] = vert_coords[ei2][2]
+        up = <unsigned short*>(&buf[buf_off + 48])
+        up[0] = 0
+        n_tris += 1
+        t_idx += 3
+
+    return n_tris
+
+
+cdef void _mc_assemble_triangles_parallel(mc_args_t *a) noexcept nogil:
+    """Pass 2: Parallel triangle assembly — face-layers are read-only.
+    Per-thread STL buffers with mutex-protected fwrite.
+    """
+    cdef int j, i, tid, t, n_cell_tris
+    cdef int px = a.px
+    cdef int py = a.py
+    cdef int n_threads = a.mc_n_threads
+    cdef int BUF_MAX = a.BUF_MAX
+    cdef signed char *ba = a.band_a
+    cdef signed char *bb = a.band_b
+
+    # Per-thread STL buffers
+    cdef unsigned char **t_bufs = <unsigned char**>malloc(n_threads * sizeof(unsigned char*))
+    cdef int *t_buf_counts = <int*>malloc(n_threads * sizeof(int))
+    cdef int *t_tri_counts = <int*>malloc(n_threads * sizeof(int))
+
+    for t in range(n_threads):
+        t_bufs[t] = <unsigned char*>malloc(BUF_MAX * 50)
+        t_buf_counts[t] = 0
+        t_tri_counts[t] = 0
+
+    for j in prange(py - 1, num_threads=n_threads, schedule='dynamic', chunksize=4):
+        tid = threadid()
+        for i in range(px - 1):
+            # OPT 15: Band skip (identical to sequential)
+            if (ba[i * py + j] == 0 and ba[(i + 1) * py + j] == 0
+                    and ba[i * py + (j + 1)] == 0
+                    and ba[(i + 1) * py + (j + 1)] == 0
+                    and bb[i * py + j] == 0
+                    and bb[(i + 1) * py + j] == 0
+                    and bb[i * py + (j + 1)] == 0
+                    and bb[(i + 1) * py + (j + 1)] == 0):
+                continue
+
+            # Flush if not enough room for worst case (12 tris/cell)
+            if t_buf_counts[tid] > BUF_MAX - 12:
+                pthread_mutex_lock(&a.write_mutex)
+                fwrite(t_bufs[tid], 1, t_buf_counts[tid] * 50, a.fp)
+                pthread_mutex_unlock(&a.write_mutex)
+                t_buf_counts[tid] = 0
+
+            n_cell_tris = _mc_emit_cell(a, i, j, t_bufs[tid], t_buf_counts[tid])
+            t_buf_counts[tid] += n_cell_tris
+            t_tri_counts[tid] += n_cell_tris
+
+    # Flush remaining per-thread buffers and sum counts
+    cdef int total_tris = 0
+    for t in range(n_threads):
+        if t_buf_counts[t] > 0:
+            fwrite(t_bufs[t], 1, t_buf_counts[t] * 50, a.fp)
+        total_tris += t_tri_counts[t]
+        free(t_bufs[t])
+    a.tri_count += total_tris
+
+    free(t_bufs)
+    free(t_buf_counts)
+    free(t_tri_counts)
+
+
+cdef void _mc_process_layer_two_pass(mc_args_t *a, int is_first_layer) noexcept nogil:
+    """OPT 16: Two-pass parallel MC preserving face-layer vertex dedup.
+    Pass 1: Pre-compute edge vertices in parallel (each position written once).
+    Pass 2: Assemble triangles in parallel (face-layers read-only).
+    """
+    _precompute_layer_edges(a, is_first_layer)
+    _mc_assemble_triangles_parallel(a)
+
+
 def fused_stl_export(
     const unsigned char[::1] packed,
     long long rx, long long ry, long long rz,
@@ -2501,6 +2826,7 @@ def fused_stl_export(
     int stride=1,
     float isovalue=0.0,
     int n_threads=0,
+    int compute_normals=0,
 ):
     """Fully fused binary STL export: packed bits -> STL file on disk.
 
@@ -2826,6 +3152,12 @@ def fused_stl_export(
         mc_args.layer_ptrs[_l] = layer_ptrs[_l]
         mc_args.layer_jstride[_l] = layer_jstride[_l]
 
+    # OPT 17: Normal elision flag
+    mc_args.compute_normals = compute_normals
+    # --- OPT 16: Set MC thread count and init write mutex ---
+    mc_args.mc_n_threads = _get_fused_export_threads(py - 1)
+    pthread_mutex_init(&mc_args.write_mutex, NULL)
+
     # --- OPT 10: Init pthread MC pipeline ---
     mc_args.mc_go = 0
     mc_args.mc_finished = 0
@@ -2991,6 +3323,7 @@ def fused_stl_export(
         pthread_mutex_unlock(&mc_args.mutex)
         pthread_join(mc_thread, NULL)
         pthread_mutex_destroy(&mc_args.mutex)
+        pthread_mutex_destroy(&mc_args.write_mutex)
         pthread_cond_destroy(&mc_args.slice_ready)
         pthread_cond_destroy(&mc_args.mc_done)
 

@@ -652,6 +652,7 @@ class VoxelModel:
             cache = kwargs.pop('cache', True)
             target_reduction = kwargs.pop('target_reduction', 0.0)
             mc_stride = kwargs.pop('mc_stride', 2)
+            compute_normals = kwargs.pop('compute_normals', False)
             method = kwargs.pop('method', 'auto')
             # Lazy render guard — fused path needs packed voxel_data
             if self.voxel_data is None:
@@ -675,7 +676,8 @@ class VoxelModel:
                 n_tris = _fused_stl(
                     self.voxel_data, rx, ry, rz, kern['int8'],
                     vsv[0], vsv[1], vsv[2], filename,
-                    stride=mc_stride, isovalue=isovalue)
+                    stride=mc_stride, isovalue=isovalue,
+                    compute_normals=int(compute_normals))
                 LOGGER.info(f"\t...fused STL completed: {n_tris} tris "
                             f"in {time.time()-_t0:.2f} s")
             else:
