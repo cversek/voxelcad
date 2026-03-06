@@ -96,10 +96,27 @@ def _detect_p_cores():
     return _cached_p_cores
 
 
-def _get_optimal_threads(int rz):
-    """Determine optimal thread count."""
+def _get_optimal_threads(int work_items):
+    """Determine optimal thread count for uniform-work kernels."""
     cdef int p_cores = _detect_p_cores()
-    return min(p_cores, rz)
+    return max(1, min(p_cores, work_items))
+
+
+def _get_fused_export_threads(int work_items):
+    """Determine optimal thread count for fused_stl_export pipeline.
+
+    The fused pipeline has non-uniform work (OPT 13 surface band skip
+    creates load imbalance) plus a dedicated MC pthread. Empirically,
+    reserving 1-2 P-cores for OS/runtime/MC gave better throughput:
+    10/12 P-cores (83%) was optimal on M3 Max 12P+4E.
+    """
+    cdef int p_cores = _detect_p_cores()
+    cdef int effective = p_cores
+    if p_cores >= 8:
+        effective = p_cores - 2
+    elif p_cores >= 4:
+        effective = p_cores - 1
+    return max(1, min(effective, work_items))
 
 
 # ---------------------------------------------------------------------------
@@ -2640,7 +2657,7 @@ def fused_stl_export(
     cdef pthread_t mc_thread
 
     if n_threads <= 0:
-        n_threads = _get_optimal_threads(px)
+        n_threads = _get_fused_export_threads(px)
 
     # Open file with C-level I/O (no GIL needed for writes)
     cdef bytes fn_bytes = filename.encode('utf-8')
