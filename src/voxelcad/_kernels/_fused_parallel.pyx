@@ -42,6 +42,30 @@ cdef extern from "pthread.h" nogil:
     int pthread_create(pthread_t *, void *, void *(*)(void *), void *)
     int pthread_join(pthread_t, void **)
 
+# MC layer-processing arguments struct (OPT 10: enables pthread extraction)
+ctypedef struct mc_args_t:
+    signed char *slice_a
+    signed char *slice_b
+    int px
+    int py
+    int k
+    signed char *ft
+    int ft_ncols
+    float *layer_ptrs[5]
+    int layer_jstride[5]
+    float mc_ox
+    float mc_oy
+    float mc_oz
+    float mc_vsx
+    float mc_vsy
+    float mc_vsz
+    float isovalue
+    unsigned char *stl_buf
+    int buf_count
+    int tri_count
+    FILE *fp
+    int BUF_MAX
+
 np.import_array()
 
 
@@ -2246,6 +2270,170 @@ cdef inline int _lew_copy_3d(
     return n
 
 
+cdef void _mc_process_layer(mc_args_t *a) noexcept nogil:
+    """Process one Z-layer of marching cubes, emitting triangles to STL buffer.
+    Pure C — no Python objects, no GIL. All state via mc_args_t struct.
+    """
+    cdef int i, j, e, t_idx
+    cdef int cube_idx
+    cdef unsigned short edges_mask
+    cdef float corner_vals[8]
+    cdef float vert_coords[13][3]
+    cdef float v0_val, v1_val, t_interp
+    cdef int v0_idx, v1_idx
+    cdef float vx
+    cdef float ux, uy, uz, wx, wy, wz, nn
+    cdef signed char edge_buf[36]
+    cdef int n_edges, need_edge12
+    cdef float w_e, wsum
+    cdef int fl_li, fl_off
+    cdef float *fl_p
+    cdef float *fptr
+    cdef unsigned short *up
+    cdef int buf_off
+    cdef int ei0, ei1, ei2
+    cdef int px = a.px
+    cdef int py = a.py
+    cdef int k = a.k
+    cdef signed char *sa = a.slice_a
+    cdef signed char *sb = a.slice_b
+    cdef signed char *ft = a.ft
+    cdef int ft_ncols = a.ft_ncols
+    cdef float isovalue = a.isovalue
+    cdef float mc_ox = a.mc_ox
+    cdef float mc_oy = a.mc_oy
+    cdef float mc_oz = a.mc_oz
+    cdef float mc_vsx = a.mc_vsx
+    cdef float mc_vsy = a.mc_vsy
+    cdef float mc_vsz = a.mc_vsz
+
+    for j in range(py - 1):
+        for i in range(px - 1):
+            corner_vals[0] = <float>sa[i * py + j]
+            corner_vals[1] = <float>sa[(i + 1) * py + j]
+            corner_vals[2] = <float>sa[(i + 1) * py + (j + 1)]
+            corner_vals[3] = <float>sa[i * py + (j + 1)]
+            corner_vals[4] = <float>sb[i * py + j]
+            corner_vals[5] = <float>sb[(i + 1) * py + j]
+            corner_vals[6] = <float>sb[(i + 1) * py + (j + 1)]
+            corner_vals[7] = <float>sb[i * py + (j + 1)]
+
+            cube_idx = 0
+            if corner_vals[0] > isovalue: cube_idx |= 1
+            if corner_vals[1] > isovalue: cube_idx |= 2
+            if corner_vals[2] > isovalue: cube_idx |= 4
+            if corner_vals[3] > isovalue: cube_idx |= 8
+            if corner_vals[4] > isovalue: cube_idx |= 16
+            if corner_vals[5] > isovalue: cube_idx |= 32
+            if corner_vals[6] > isovalue: cube_idx |= 64
+            if corner_vals[7] > isovalue: cube_idx |= 128
+
+            n_edges = ft[cube_idx * ft_ncols]
+            if n_edges == 0:
+                continue
+
+            edges_mask = 0
+            need_edge12 = 0
+            for t_idx in range(n_edges):
+                edge_buf[t_idx] = ft[cube_idx * ft_ncols + 1 + t_idx]
+                if edge_buf[t_idx] == 12:
+                    need_edge12 = 1
+                elif 0 <= edge_buf[t_idx] < 12:
+                    edges_mask |= <unsigned short>(1 << edge_buf[t_idx])
+
+            for e in range(12):
+                if not (edges_mask & (1 << e)):
+                    continue
+                fl_li = _EDGE_LAYER[e]
+                fl_p = a.layer_ptrs[fl_li]
+                fl_off = ((i + _EDGE_DI_OFF[e]) * a.layer_jstride[fl_li]
+                          + (j + _EDGE_DJ_OFF[e]) * 3)
+                vx = fl_p[fl_off]
+                if vx == vx:
+                    vert_coords[e][0] = fl_p[fl_off]
+                    vert_coords[e][1] = fl_p[fl_off + 1]
+                    vert_coords[e][2] = fl_p[fl_off + 2]
+                    continue
+                v0_idx = _EDGE_V0[e]
+                v1_idx = _EDGE_V1[e]
+                v0_val = corner_vals[v0_idx]
+                v1_val = corner_vals[v1_idx]
+                if v0_val == v1_val:
+                    t_interp = 0.5
+                else:
+                    t_interp = (isovalue - v0_val) / (v1_val - v0_val)
+                vert_coords[e][0] = mc_ox + mc_vsx * (
+                    <float>(i + _VTX_DI[v0_idx]) +
+                    t_interp * <float>(_VTX_DI[v1_idx] - _VTX_DI[v0_idx]))
+                vert_coords[e][1] = mc_oy + mc_vsy * (
+                    <float>(j + _VTX_DJ[v0_idx]) +
+                    t_interp * <float>(_VTX_DJ[v1_idx] - _VTX_DJ[v0_idx]))
+                vert_coords[e][2] = mc_oz + mc_vsz * (
+                    <float>(k + _VTX_DK[v0_idx]) +
+                    t_interp * <float>(_VTX_DK[v1_idx] - _VTX_DK[v0_idx]))
+                fl_p[fl_off] = vert_coords[e][0]
+                fl_p[fl_off + 1] = vert_coords[e][1]
+                fl_p[fl_off + 2] = vert_coords[e][2]
+
+            if need_edge12:
+                wsum = 0.0
+                vert_coords[12][0] = 0.0
+                vert_coords[12][1] = 0.0
+                vert_coords[12][2] = 0.0
+                for e in range(8):
+                    w_e = corner_vals[e] - isovalue
+                    if w_e < 0:
+                        w_e = -w_e
+                    w_e = 1.0 / (LEW_EPS + w_e)
+                    vert_coords[12][0] += w_e * (mc_ox + mc_vsx * <float>(i + _VTX_DI[e]))
+                    vert_coords[12][1] += w_e * (mc_oy + mc_vsy * <float>(j + _VTX_DJ[e]))
+                    vert_coords[12][2] += w_e * (mc_oz + mc_vsz * <float>(k + _VTX_DK[e]))
+                    wsum += w_e
+                if wsum > 0.0:
+                    vert_coords[12][0] /= wsum
+                    vert_coords[12][1] /= wsum
+                    vert_coords[12][2] /= wsum
+
+            t_idx = 0
+            while t_idx < n_edges:
+                ei0 = edge_buf[t_idx]
+                ei1 = edge_buf[t_idx + 2]
+                ei2 = edge_buf[t_idx + 1]
+                buf_off = a.buf_count * 50
+                fptr = <float*>(&a.stl_buf[buf_off])
+                ux = vert_coords[ei1][0] - vert_coords[ei0][0]
+                uy = vert_coords[ei1][1] - vert_coords[ei0][1]
+                uz = vert_coords[ei1][2] - vert_coords[ei0][2]
+                wx = vert_coords[ei2][0] - vert_coords[ei0][0]
+                wy = vert_coords[ei2][1] - vert_coords[ei0][1]
+                wz = vert_coords[ei2][2] - vert_coords[ei0][2]
+                fptr[0] = uy * wz - uz * wy
+                fptr[1] = uz * wx - ux * wz
+                fptr[2] = ux * wy - uy * wx
+                nn = sqrt(fptr[0]*fptr[0] + fptr[1]*fptr[1] + fptr[2]*fptr[2])
+                if nn > 0.0:
+                    fptr[0] = fptr[0] / nn
+                    fptr[1] = fptr[1] / nn
+                    fptr[2] = fptr[2] / nn
+                fptr[3] = vert_coords[ei0][0]
+                fptr[4] = vert_coords[ei0][1]
+                fptr[5] = vert_coords[ei0][2]
+                fptr[6] = vert_coords[ei1][0]
+                fptr[7] = vert_coords[ei1][1]
+                fptr[8] = vert_coords[ei1][2]
+                fptr[9] = vert_coords[ei2][0]
+                fptr[10] = vert_coords[ei2][1]
+                fptr[11] = vert_coords[ei2][2]
+                up = <unsigned short*>(&a.stl_buf[buf_off + 48])
+                up[0] = 0
+                a.buf_count += 1
+                a.tri_count += 1
+                t_idx += 3
+                if a.buf_count == a.BUF_MAX:
+                    fwrite(a.stl_buf, 1, a.BUF_MAX * 50, a.fp)
+                    a.buf_count = 0
+
+
 def fused_stl_export(
     const unsigned char[::1] packed,
     long long rx, long long ry, long long rz,
@@ -2417,6 +2605,8 @@ def fused_stl_export(
     cdef int src_z
     cdef long long slab_bit_idx
     cdef int dk_off[64]  # precomputed slot_offset = slot * slab_slice_size
+    cdef mc_args_t mc_args
+    cdef int _l
 
     if n_threads <= 0:
         n_threads = _get_optimal_threads(px)
@@ -2508,164 +2698,35 @@ def fused_stl_export(
     layer_ptrs[3] = &lby[0, 0, 0]
     layer_ptrs[4] = &zed[0, 0, 0]
 
+    # OPT 10: Initialize MC args struct
+    mc_args.px = px
+    mc_args.py = py
+    mc_args.ft = <signed char*>&ft[0, 0]
+    mc_args.ft_ncols = ft.shape[1]
+    mc_args.mc_ox = mc_ox
+    mc_args.mc_oy = mc_oy
+    mc_args.mc_oz = mc_oz
+    mc_args.mc_vsx = mc_vsx
+    mc_args.mc_vsy = mc_vsy
+    mc_args.mc_vsz = mc_vsz
+    mc_args.isovalue = isovalue
+    mc_args.stl_buf = stl_buf
+    mc_args.buf_count = 0
+    mc_args.tri_count = 0
+    mc_args.fp = fp
+    mc_args.BUF_MAX = BUF_MAX
+    for _l in range(5):
+        mc_args.layer_ptrs[_l] = layer_ptrs[_l]
+        mc_args.layer_jstride[_l] = layer_jstride[_l]
+
     # --- Main Z-sweep: MC on slice pairs + STL write ---
     for k in range(pz - 1):
-        # MC on slice_a(z=k), slice_b(z=k+1)
-        # All operations below are pure C: typed memoryviews, C pointers,
-        # libc fwrite/sqrt. nogil enables pipeline parallelism with conv.
+        # MC via extracted nogil function (OPT 10 refactor)
+        mc_args.k = k
+        mc_args.slice_a = &slice_a[0, 0]
+        mc_args.slice_b = &slice_b[0, 0]
         with nogil:
-          for j in range(py - 1):
-            for i in range(px - 1):
-                corner_vals[0] = <float>slice_a[i, j]
-                corner_vals[1] = <float>slice_a[i + 1, j]
-                corner_vals[2] = <float>slice_a[i + 1, j + 1]
-                corner_vals[3] = <float>slice_a[i, j + 1]
-                corner_vals[4] = <float>slice_b[i, j]
-                corner_vals[5] = <float>slice_b[i + 1, j]
-                corner_vals[6] = <float>slice_b[i + 1, j + 1]
-                corner_vals[7] = <float>slice_b[i, j + 1]
-
-                # Lewiner convention: val > isovalue → bit set (inside).
-                # Tables produce inward normals; emission swaps e1/e2
-                # to get outward normals.
-                cube_idx = 0
-                if corner_vals[0] > isovalue: cube_idx |= 1
-                if corner_vals[1] > isovalue: cube_idx |= 2
-                if corner_vals[2] > isovalue: cube_idx |= 4
-                if corner_vals[3] > isovalue: cube_idx |= 8
-                if corner_vals[4] > isovalue: cube_idx |= 16
-                if corner_vals[5] > isovalue: cube_idx |= 32
-                if corner_vals[6] > isovalue: cube_idx |= 64
-                if corner_vals[7] > isovalue: cube_idx |= 128
-
-                # Flat tiling lookup — O(1) dispatch replaces 15-case Lewiner switch
-                n_edges = ft[cube_idx, 0]
-                if n_edges == 0:
-                    continue
-
-                # Copy edge list and build edges_mask in one pass
-                edges_mask = 0
-                need_edge12 = 0
-                for t_idx in range(n_edges):
-                    edge_buf[t_idx] = ft[cube_idx, 1 + t_idx]
-                    if edge_buf[t_idx] == 12:
-                        need_edge12 = 1
-                    elif 0 <= edge_buf[t_idx] < 12:
-                        edges_mask |= <unsigned short>(1 << edge_buf[t_idx])
-
-                # Look up or interpolate vertices on active edges
-                for e in range(12):
-                    if not (edges_mask & (1 << e)):
-                        continue
-
-                    # Indexed face-layer lookup via jump table
-                    fl_li = _EDGE_LAYER[e]
-                    fl_p = layer_ptrs[fl_li]
-                    fl_off = ((i + _EDGE_DI_OFF[e]) * layer_jstride[fl_li]
-                              + (j + _EDGE_DJ_OFF[e]) * 3)
-                    vx = fl_p[fl_off]
-
-                    # NaN check: vx == vx is False for NaN
-                    if vx == vx:
-                        # Cached — read all 3 coords via pointer
-                        vert_coords[e][0] = fl_p[fl_off]
-                        vert_coords[e][1] = fl_p[fl_off + 1]
-                        vert_coords[e][2] = fl_p[fl_off + 2]
-                        continue
-
-                    # Not cached — interpolate and store
-                    v0_idx = _EDGE_V0[e]
-                    v1_idx = _EDGE_V1[e]
-                    v0_val = corner_vals[v0_idx]
-                    v1_val = corner_vals[v1_idx]
-                    if v0_val == v1_val:
-                        t_interp = 0.5
-                    else:
-                        t_interp = (isovalue - v0_val) / (v1_val - v0_val)
-                    vert_coords[e][0] = mc_ox + mc_vsx * (
-                        <float>(i + _VTX_DI[v0_idx]) +
-                        t_interp * <float>(_VTX_DI[v1_idx] - _VTX_DI[v0_idx]))
-                    vert_coords[e][1] = mc_oy + mc_vsy * (
-                        <float>(j + _VTX_DJ[v0_idx]) +
-                        t_interp * <float>(_VTX_DJ[v1_idx] - _VTX_DJ[v0_idx]))
-                    vert_coords[e][2] = mc_oz + mc_vsz * (
-                        <float>(k + _VTX_DK[v0_idx]) +
-                        t_interp * <float>(_VTX_DK[v1_idx] - _VTX_DK[v0_idx]))
-
-                    # Cache in face-layer via pointer
-                    fl_p[fl_off] = vert_coords[e][0]
-                    fl_p[fl_off + 1] = vert_coords[e][1]
-                    fl_p[fl_off + 2] = vert_coords[e][2]
-
-                # Edge 12: center vertex (inverse-distance weighted avg, rare)
-                if need_edge12:
-                    wsum = 0.0
-                    vert_coords[12][0] = 0.0
-                    vert_coords[12][1] = 0.0
-                    vert_coords[12][2] = 0.0
-                    for e in range(8):
-                        w_e = corner_vals[e] - isovalue
-                        if w_e < 0:
-                            w_e = -w_e
-                        w_e = 1.0 / (LEW_EPS + w_e)
-                        vert_coords[12][0] += w_e * (mc_ox + mc_vsx * <float>(i + _VTX_DI[e]))
-                        vert_coords[12][1] += w_e * (mc_oy + mc_vsy * <float>(j + _VTX_DJ[e]))
-                        vert_coords[12][2] += w_e * (mc_oz + mc_vsz * <float>(k + _VTX_DK[e]))
-                        wsum += w_e
-                    if wsum > 0.0:
-                        vert_coords[12][0] /= wsum
-                        vert_coords[12][1] /= wsum
-                        vert_coords[12][2] /= wsum
-
-                # Emit triangles: swap ei1/ei2 to reverse Lewiner's inward
-                # winding to outward normals.
-                t_idx = 0
-                while t_idx < n_edges:
-                    ei0 = edge_buf[t_idx]
-                    ei1 = edge_buf[t_idx + 2]   # swapped
-                    ei2 = edge_buf[t_idx + 1]   # swapped
-
-                    buf_off = buf_count * 50
-                    fptr = <float*>(&stl_buf[buf_off])
-                    # Cross product (v1-v0) x (v2-v0) — outward after swap
-                    ux = vert_coords[ei1][0] - vert_coords[ei0][0]
-                    uy = vert_coords[ei1][1] - vert_coords[ei0][1]
-                    uz = vert_coords[ei1][2] - vert_coords[ei0][2]
-                    wx = vert_coords[ei2][0] - vert_coords[ei0][0]
-                    wy = vert_coords[ei2][1] - vert_coords[ei0][1]
-                    wz = vert_coords[ei2][2] - vert_coords[ei0][2]
-                    fptr[0] = uy * wz - uz * wy
-                    fptr[1] = uz * wx - ux * wz
-                    fptr[2] = ux * wy - uy * wx
-                    # Normalize
-                    nn = sqrt(fptr[0]*fptr[0] + fptr[1]*fptr[1] + fptr[2]*fptr[2])
-                    if nn > 0.0:
-                        fptr[0] = fptr[0] / nn
-                        fptr[1] = fptr[1] / nn
-                        fptr[2] = fptr[2] / nn
-                    # Vertex 0
-                    fptr[3] = vert_coords[ei0][0]
-                    fptr[4] = vert_coords[ei0][1]
-                    fptr[5] = vert_coords[ei0][2]
-                    # Vertex 1
-                    fptr[6] = vert_coords[ei1][0]
-                    fptr[7] = vert_coords[ei1][1]
-                    fptr[8] = vert_coords[ei1][2]
-                    # Vertex 2
-                    fptr[9] = vert_coords[ei2][0]
-                    fptr[10] = vert_coords[ei2][1]
-                    fptr[11] = vert_coords[ei2][2]
-                    # Attribute byte count
-                    up = <unsigned short*>(&stl_buf[buf_off + 48])
-                    up[0] = 0
-
-                    buf_count += 1
-                    tri_count += 1
-                    t_idx += 3
-
-                    if buf_count == BUF_MAX:
-                        fwrite(stl_buf, 1, BUF_MAX * 50, fp)
-                        buf_count = 0
+            _mc_process_layer(&mc_args)
 
         # --- Advance Z-slices and face layers ---
         slice_a_np, slice_b_np = slice_b_np, slice_a_np
@@ -2674,13 +2735,13 @@ def fused_stl_export(
 
         # Swap face layers via C pointer swap (no Python refcounting).
         # lax(0) ↔ lbx(2), lay(1) ↔ lby(3). zed(4) stays, just reset.
-        # MC loop uses layer_ptrs exclusively — no memoryview aliasing risk.
-        tmp_ptr = layer_ptrs[0]; layer_ptrs[0] = layer_ptrs[2]; layer_ptrs[2] = tmp_ptr
-        tmp_ptr = layer_ptrs[1]; layer_ptrs[1] = layer_ptrs[3]; layer_ptrs[3] = tmp_ptr
+        # Uses mc_args.layer_ptrs — canonical copy for _mc_process_layer.
+        tmp_ptr = mc_args.layer_ptrs[0]; mc_args.layer_ptrs[0] = mc_args.layer_ptrs[2]; mc_args.layer_ptrs[2] = tmp_ptr
+        tmp_ptr = mc_args.layer_ptrs[1]; mc_args.layer_ptrs[1] = mc_args.layer_ptrs[3]; mc_args.layer_ptrs[3] = tmp_ptr
         # Reset new top layers + z-edges with NaN via 0xFF memset
-        memset(layer_ptrs[2], 0xFF, (px - 1) * py * 3 * sizeof(float))
-        memset(layer_ptrs[3], 0xFF, px * (py - 1) * 3 * sizeof(float))
-        memset(layer_ptrs[4], 0xFF, px * py * 3 * sizeof(float))
+        memset(mc_args.layer_ptrs[2], 0xFF, (px - 1) * py * 3 * sizeof(float))
+        memset(mc_args.layer_ptrs[3], 0xFF, px * (py - 1) * 3 * sizeof(float))
+        memset(mc_args.layer_ptrs[4], 0xFF, px * py * 3 * sizeof(float))
 
         if k + 2 < pz:
             # Compute next convolved Z-slice into slice_b
@@ -2747,13 +2808,13 @@ def fused_stl_export(
                                 slice_b[pi, pj] = <signed char>conv_val
 
     # Flush remaining buffer
-    if buf_count > 0:
-        fwrite(stl_buf, 1, buf_count * 50, fp)
+    if mc_args.buf_count > 0:
+        fwrite(stl_buf, 1, mc_args.buf_count * 50, fp)
 
     # Write triangle count at byte 80
-    cdef unsigned int tri_count_u = <unsigned int>tri_count
+    cdef unsigned int tri_count_u = <unsigned int>mc_args.tri_count
     fseek(fp, 80, SEEK_SET)
     fwrite(&tri_count_u, 4, 1, fp)
     fclose(fp)
 
-    return tri_count
+    return mc_args.tri_count
