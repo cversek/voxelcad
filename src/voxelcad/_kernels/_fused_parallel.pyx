@@ -17,9 +17,30 @@ import os
 import numpy as np
 cimport numpy as np
 from libc.math cimport cos, sin, fabs, sqrt, pow as cpow
-from libc.stdio cimport fopen, fwrite, fseek, fclose, FILE, SEEK_SET
+from libc.stdio cimport fopen, fwrite, fseek, fclose, FILE, SEEK_SET, fprintf, stderr
 from libc.string cimport memset
+from libc.stdlib cimport malloc, free
 from cython.parallel cimport prange
+
+# pthread declarations for pipeline overlap (OPT 10)
+cdef extern from "pthread.h" nogil:
+    ctypedef struct pthread_mutex_t:
+        pass
+    ctypedef struct pthread_cond_t:
+        pass
+    int pthread_mutex_init(pthread_mutex_t *, void *)
+    int pthread_mutex_lock(pthread_mutex_t *)
+    int pthread_mutex_unlock(pthread_mutex_t *)
+    int pthread_cond_init(pthread_cond_t *, void *)
+    int pthread_cond_wait(pthread_cond_t *, pthread_mutex_t *)
+    int pthread_cond_signal(pthread_cond_t *)
+    int pthread_mutex_destroy(pthread_mutex_t *)
+    int pthread_cond_destroy(pthread_cond_t *)
+
+cdef extern from "pthread.h" nogil:
+    ctypedef unsigned long pthread_t
+    int pthread_create(pthread_t *, void *, void *(*)(void *), void *)
+    int pthread_join(pthread_t, void **)
 
 np.import_array()
 
