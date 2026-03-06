@@ -2690,7 +2690,7 @@ def fused_stl_export(
     for dk in range(kz_dim):
         dk_off[dk] = ((conv_k + dk) % kz_dim) * slab_slice_size
     with nogil:
-        for pi in prange(px, num_threads=n_threads, schedule='static'):
+        for pi in prange(px, num_threads=n_threads, schedule='dynamic', chunksize=4):
             for pj in range(py):
                 if pi == 0 or pi == px - 1 or pj == 0 or pj == py - 1:
                     slice_b[pi, pj] = -1
@@ -2837,7 +2837,7 @@ def fused_stl_export(
                     dk_off[dk] = ((conv_k + dk) % kz_dim) * slab_slice_size
                 with nogil:
                     for pi in prange(px, num_threads=n_threads,
-                                     schedule='static'):
+                                     schedule='dynamic', chunksize=4):
                         for pj in range(py):
                             if (pi == 0 or pi == px - 1 or
                                     pj == 0 or pj == py - 1):
