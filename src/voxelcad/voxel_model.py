@@ -81,6 +81,49 @@ class VoxelModel:
         bit_offset = start - byte_start * 8
         return bits[bit_offset:bit_offset + slice_size].reshape(rx, ry, order='F').view(np.bool_)
 
+    def _ensure_boundary_padding(self, n=1):
+        """Force outermost n voxel layers to 0 in packed data.
+
+        Operates directly on packed bytes — no full-volume unpack.
+        Z-faces zeroed via contiguous byte ranges; Y/X-faces via
+        vectorized bit operations.
+        """
+        rx, ry, rz = self._voxel_shape
+        if n <= 0 or 2 * n >= min(rx, ry, rz):
+            return
+        data = self.voxel_data
+        rxy = rx * ry
+        # --- Z faces: contiguous bit ranges at start/end of packed array ---
+        lo_end = n * rxy  # first n slices
+        data[:lo_end // 8] = 0
+        if lo_end & 7:
+            data[lo_end // 8] &= np.uint8(0xFF >> (lo_end & 7))
+        hi_start = (rz - n) * rxy  # last n slices
+        full_start = (hi_start + 7) // 8
+        data[full_start:] = 0
+        if hi_start & 7:
+            data[hi_start // 8] &= np.uint8((0xFF << (8 - (hi_start & 7))) & 0xFF)
+        # --- Y and X faces: vectorized bit clear on non-boundary Z slices ---
+        z_inner = np.arange(n, rz - n, dtype=np.int64)
+        y_inner = np.arange(n, ry - n, dtype=np.int64)
+        x_all = np.arange(rx, dtype=np.int64)
+        # Y boundary rows
+        y_bnd = np.concatenate([np.arange(n, dtype=np.int64),
+                                np.arange(ry - n, ry, dtype=np.int64)])
+        Xy, Yy, Zy = np.meshgrid(x_all, y_bnd, z_inner, indexing='ij')
+        lin_y = Xy.ravel() + Yy.ravel() * rx + Zy.ravel() * rxy
+        # X boundary columns
+        x_bnd = np.concatenate([np.arange(n, dtype=np.int64),
+                                np.arange(rx - n, rx, dtype=np.int64)])
+        Xx, Yx, Zx = np.meshgrid(x_bnd, y_inner, z_inner, indexing='ij')
+        lin_x = Xx.ravel() + Yx.ravel() * rx + Zx.ravel() * rxy
+        # Apply bit clears
+        lin_yx = np.concatenate([lin_y, lin_x])
+        byte_idx = (lin_yx >> 3).astype(np.intp)
+        bit_mask = np.left_shift(np.uint8(1),
+                                 (7 - (lin_yx & 7)).astype(np.uint8))
+        np.bitwise_and.at(data, byte_idx, ~bit_mask)
+
     def render_on_grid(self, grid, M4inv=None):
         """THE unified interface for geometry evaluation.
 
