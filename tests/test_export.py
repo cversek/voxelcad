@@ -303,6 +303,74 @@ class TestFusedMeshExport:
         assert m.n_cells > 0
         assert self._open_edge_count(m) == 0
 
+    @pytest.mark.parametrize("size,thresh1,thresh2,vs,desc", [
+        (2, 1.0, None, 0.05, "solid_small_126vpp"),
+        (3, 0.8, None, 0.1, "solid_mid_63vpp"),
+        (10, 1.0, None, 0.1, "solid_large_63vpp"),
+        (3, -0.5, 0.5, 0.1, "shell_thick_63vpp"),
+        (3, -0.3, 0.3, 0.2, "shell_thin_31vpp"),
+    ])
+    def test_gyroid_manifold_good_params(self, size, thresh1, thresh2, vs, desc):
+        """Known-good gyroid params should produce 0 open edges."""
+        kw = dict(size=size, voxel_size=vs, thresh1=thresh1)
+        if thresh2 is not None:
+            kw['thresh2'] = thresh2
+        g = GyroidCube(**kw)
+        m = g.render_surface_mesh(method='fast_smooth')
+        assert m.n_points > 0, f"{desc}: empty mesh"
+        oe = self._open_edge_count(m)
+        assert oe == 0, f"{desc}: {oe} open edges (expect 0)"
+
+    @pytest.mark.parametrize("size,thresh1,vs,approx_oe,desc", [
+        (10, 1.0, 0.3125, 3300, "20vpp_pathological"),
+        (10, 1.0, 0.2, 18864, "31vpp_worst_case"),
+        (3, 0.5, 0.1, 1008, "63vpp_low_thresh"),
+    ])
+    def test_gyroid_pathological_params(self, size, thresh1, vs, approx_oe, desc):
+        """Known-pathological gyroid params — documents expected open edges.
+
+        These configs have resolution/kernel interference that produces
+        non-manifold output. The LCC filter (Task #108) will fix these.
+        Until then, just verify the mesh is non-empty and open edges
+        are in the expected ballpark (within 50% of known value).
+        """
+        g = GyroidCube(size=size, voxel_size=vs, thresh1=thresh1)
+        m = g.render_surface_mesh(method='fast_smooth')
+        assert m.n_points > 0, f"{desc}: empty mesh"
+        oe = self._open_edge_count(m)
+        assert oe > 0, f"{desc}: expected non-zero open edges, got 0"
+        # Ballpark check — exact count varies with build/platform
+        assert oe > approx_oe * 0.5, (
+            f"{desc}: {oe} oe much less than expected ~{approx_oe}")
+        assert oe < approx_oe * 1.5, (
+            f"{desc}: {oe} oe much more than expected ~{approx_oe}")
+
+    def test_only_largest_component_mesh(self):
+        """only_largest_component should remove fragments from pathological gyroid."""
+        g = GyroidCube(size=10, voxel_size=0.3125, thresh1=1.0)
+        m_raw = g.render_surface_mesh(method='fast_smooth',
+                                      only_largest_component=False, cache=False)
+        m_lcc = g.render_surface_mesh(method='fast_smooth',
+                                      only_largest_component=True, cache=False)
+        assert m_lcc.n_points > 0
+        assert m_lcc.n_cells < m_raw.n_cells, (
+            f"LCC should remove fragments: {m_lcc.n_cells} >= {m_raw.n_cells}")
+
+    def test_only_largest_component_stl(self, tmp_path):
+        """STL export with only_largest_component should route through mesh+LCC."""
+        g = GyroidCube(size=10, voxel_size=0.3125, thresh1=1.0)
+        # Without LCC — should have open edges
+        fname_raw = str(tmp_path / "raw.stl")
+        g.export(fname_raw, only_largest_component=False)
+        n_raw = _stl_tri_count(fname_raw)
+        # With LCC — should have fewer tris (fragments removed)
+        fname_lcc = str(tmp_path / "lcc.stl")
+        g.export(fname_lcc, only_largest_component=True)
+        n_lcc = _stl_tri_count(fname_lcc)
+        assert n_lcc > 0, "LCC export produced empty STL"
+        assert n_lcc < n_raw, (
+            f"LCC should remove fragments: {n_lcc} >= {n_raw}")
+
     def test_matches_3stage_pipeline(self):
         """Fused mesh should match 3-stage pipeline output."""
         from voxelcad._kernels import fused_scale_convolve, sweep_mc_mesh

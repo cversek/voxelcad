@@ -743,7 +743,7 @@ class VoxelModel:
                 and method in ('auto', 'fast_smooth')
                 and isovalue == 0.0
             )
-            if use_fused:
+            if use_fused and not only_largest:
                 _t0 = time.time()
                 LOGGER.info(f"\tfused STL export (no intermediate volumes)...")
                 from voxelcad.utils.spectral import compute_butterworth_kernel
