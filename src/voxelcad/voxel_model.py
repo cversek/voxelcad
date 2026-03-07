@@ -652,7 +652,7 @@ class VoxelModel:
             cache = kwargs.pop('cache', True)
             target_reduction = kwargs.pop('target_reduction', 0.0)
             mc_stride = kwargs.pop('mc_stride', 2)
-            compute_normals = kwargs.pop('compute_normals', False)
+            compute_normals = kwargs.pop('compute_normals', True)
             method = kwargs.pop('method', 'auto')
             # Lazy render guard — fused path needs packed voxel_data
             if self.voxel_data is None:
