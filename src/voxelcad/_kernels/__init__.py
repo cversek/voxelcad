@@ -28,6 +28,7 @@ streaming_mc_mesh = None
 streaming_mc_stl = None
 sweep_mc_mesh = None
 fused_stl_export = None
+fused_mesh_export = None
 
 try:
     from ._fused_parallel import (
@@ -45,6 +46,7 @@ try:
         streaming_mc_stl,
         sweep_mc_mesh,
         fused_stl_export,
+        fused_mesh_export,
         _detect_p_cores,
         _get_optimal_threads,
     )
@@ -68,4 +70,5 @@ __all__ = [
     'streaming_mc_stl',
     'sweep_mc_mesh',
     'fused_stl_export',
+    'fused_mesh_export',
 ]

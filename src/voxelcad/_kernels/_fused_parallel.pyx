@@ -3338,3 +3338,463 @@ def fused_stl_export(
     fclose(fp)
 
     return mc_args.tri_count
+
+
+# ---------------------------------------------------------------------------
+# Fused mesh export: packed bits -> (vertices, faces) numpy arrays
+# ---------------------------------------------------------------------------
+# Shares convolution frontend design with fused_stl_export above.
+# DRY extraction into shared helpers deferred to Task #96 (consolidation).
+# MC backend uses int32 face-layer vertex IDs (from sweep_mc_mesh design)
+# instead of float32 coordinate storage + STL output.
+# ---------------------------------------------------------------------------
+
+def fused_mesh_export(
+    const unsigned char[::1] packed,
+    long long rx, long long ry, long long rz,
+    const signed char[:, :, ::1] kernel,
+    float vsx, float vsy, float vsz,
+    int stride=1,
+    float isovalue=0.0,
+    int n_threads=0,
+):
+    """Fully fused mesh export: packed bits -> (vertices, faces) arrays.
+
+    Fuses scale+convolve + marching cubes with face-layer vertex dedup
+    into a single streaming kernel. Only 2 Z-slices of convolved output
+    are held in memory at a time -- no intermediate SDF volume.
+
+    Args:
+        packed: F-order packed binary volume (big-endian bitorder)
+        rx, ry, rz: full-resolution grid dimensions
+        kernel: int8 quantized Butterworth kernel, shape (2r+1, 2r+1, 2r+1)
+        vsx, vsy, vsz: voxel spacing per axis
+        stride: subsample factor (1 = full resolution, 2 = half)
+        isovalue: isosurface level (typically 0.0)
+        n_threads: OpenMP threads for convolution (0 = auto-detect)
+
+    Returns:
+        tuple: (vertices float32[N,3], faces int32[M,3])
+    """
+    from voxelcad._kernels import _mc_tables_lewiner as _lew_mod
+
+    # --- Dimension calculations (same as fused_stl_export) ---
+    cdef int sx = <int>((rx + stride - 1) // stride)
+    cdef int sy = <int>((ry + stride - 1) // stride)
+    cdef int sz = <int>((rz + stride - 1) // stride)
+    cdef int px = sx + 2
+    cdef int py = sy + 2
+    cdef int pz = sz + 2
+
+    cdef int kx = kernel.shape[0]
+    cdef int ky = kernel.shape[1]
+    cdef int kz_dim = kernel.shape[2]
+    cdef int krx = kx // 2
+    cdef int kry = ky // 2
+    cdef int krz = kz_dim // 2
+
+    # MC spacing and origin (stride-dependent, same logic as fused_stl_export)
+    cdef float mc_vsx, mc_vsy, mc_vsz
+    cdef float mc_ox, mc_oy, mc_oz
+    if stride == 1:
+        mc_vsx = vsx; mc_vsy = vsy; mc_vsz = vsz
+        mc_ox = -vsx; mc_oy = -vsy; mc_oz = -vsz
+    else:
+        mc_vsx = vsx * <float>stride
+        mc_vsy = vsy * <float>stride
+        mc_vsz = vsz * <float>stride
+        mc_ox = 0.0; mc_oy = 0.0; mc_oz = 0.0
+
+    # Fast tiling table
+    cdef const signed char[:, ::1] ft = _lew_mod.fast_tiling
+
+    # --- Conv slices + band masks ---
+    slice_a_np = np.full((px, py), -1, dtype=np.int8)
+    slice_b_np = np.full((px, py), -1, dtype=np.int8)
+    slice_c_np = np.full((px, py), -1, dtype=np.int8)
+    cdef signed char[:, ::1] slice_a = slice_a_np
+    cdef signed char[:, ::1] slice_b = slice_b_np
+    cdef signed char[:, ::1] slice_c = slice_c_np
+
+    band_a_np = np.zeros((px, py), dtype=np.int8)
+    band_b_np = np.zeros((px, py), dtype=np.int8)
+    band_c_np = np.zeros((px, py), dtype=np.int8)
+    cdef signed char[:, ::1] band_a = band_a_np
+    cdef signed char[:, ::1] band_b = band_b_np
+    cdef signed char[:, ::1] band_c = band_c_np
+
+    # Source packed bits
+    cdef const unsigned char *src_ptr = &packed[0]
+    cdef long long rx_ll = rx
+    cdef long long rxy = rx * ry
+    cdef int str_val = stride
+
+    # Conv variables
+    cdef int pi, pj, di, dj, dk
+    cdef short acc
+    cdef int conv_val
+    cdef signed char src_val, center_val
+    cdef int center_sx, center_sy
+    cdef int conv_k, slab_fi, slab_fj
+
+    # --- Int32 face-layer arrays (from sweep_mc_mesh design) ---
+    lax_np = np.full((px - 1, py), -1, dtype=np.int32)
+    lay_np = np.full((px, py - 1), -1, dtype=np.int32)
+    lbx_np = np.full((px - 1, py), -1, dtype=np.int32)
+    lby_np = np.full((px, py - 1), -1, dtype=np.int32)
+    zed_np = np.full((px, py), -1, dtype=np.int32)
+    cdef int[:, ::1] lax = lax_np
+    cdef int[:, ::1] lay = lay_np
+    cdef int[:, ::1] lbx = lbx_np
+    cdef int[:, ::1] lby = lby_np
+    cdef int[:, ::1] zed = zed_np
+
+    # --- Output arrays (pre-allocated, grow as needed) ---
+    cdef int est_tris = max(4 * (px * py + py * pz + px * pz), 64)
+    verts_np = np.empty((est_tris, 3), dtype=np.float32)
+    faces_np = np.empty((est_tris, 3), dtype=np.int32)
+    cdef float[:, ::1] verts = verts_np
+    cdef int[:, ::1] faces = faces_np
+    cdef int n_verts = 0
+    cdef int n_faces = 0
+    cdef int new_size
+
+    # MC variables
+    cdef int i, j, k, e, t_idx, vid
+    cdef int cube_idx
+    cdef unsigned short edges_mask
+    cdef float corner_vals[8]
+    cdef int edge_vids[13]
+    cdef float v0_val, v1_val, t_interp
+    cdef int v0_idx, v1_idx
+    cdef signed char edge_buf[36]
+    cdef int n_edges, need_edge12
+    cdef float w_e, wsum
+
+    # Slab buffer variables (OPT 9)
+    cdef int pad_x = krx * str_val
+    cdef int pad_y = kry * str_val
+    cdef int slab_rx_dim = <int>rx + 2 * pad_x
+    cdef int slab_ry_dim = <int>ry + 2 * pad_y
+    cdef int slab_slice_size = slab_rx_dim * slab_ry_dim
+    cdef int new_src_z, evict_slot, slab_slot
+    cdef signed char *slab_ptr
+    cdef int xi, yi, src_z
+    cdef long long slab_bit_idx
+    cdef int dk_off[64]
+
+    if n_threads <= 0:
+        n_threads = _get_fused_export_threads(px)
+
+    # --- OPT 9: Slab buffer allocation and initial extraction ---
+    slab_np = np.full((kz_dim, slab_rx_dim, slab_ry_dim), -1, dtype=np.int8)
+    cdef signed char[:, :, ::1] slab_view = slab_np
+    slab_ptr = &slab_view[0, 0, 0]
+
+    conv_k = 0
+    for dk in range(kz_dim):
+        src_z = (conv_k + dk - krz) * str_val
+        if src_z < 0 or src_z >= <int>rz:
+            continue
+        slab_slot = (conv_k + dk) % kz_dim
+        with nogil:
+            for xi in prange(<int>rx, num_threads=n_threads, schedule='static'):
+                for yi in range(<int>ry):
+                    slab_bit_idx = (
+                        <long long>xi +
+                        <long long>yi * rx_ll +
+                        <long long>src_z * rxy)
+                    if (src_ptr[slab_bit_idx >> 3] >>
+                            (7 - <int>(slab_bit_idx & 7))) & 1:
+                        slab_ptr[slab_slot * slab_slice_size +
+                                 (xi + pad_x) * slab_ry_dim + (yi + pad_y)] = 1
+
+    # --- Compute initial slice_b (first convolution at z=0) ---
+    for dk in range(kz_dim):
+        dk_off[dk] = ((conv_k + dk) % kz_dim) * slab_slice_size
+    with nogil:
+        for pi in prange(px, num_threads=n_threads, schedule='dynamic', chunksize=4):
+            for pj in range(py):
+                if pi == 0 or pi == px - 1 or pj == 0 or pj == py - 1:
+                    slice_b[pi, pj] = -1
+                else:
+                    # OPT 13: 6-point axis probe
+                    center_sx = ((pi - 1) + krx) * str_val
+                    center_sy = ((pj - 1) + kry) * str_val
+                    center_val = slab_ptr[
+                        dk_off[krz] + center_sx * slab_ry_dim + center_sy]
+                    if (slab_ptr[dk_off[0] + center_sx * slab_ry_dim + center_sy] != center_val
+                        or slab_ptr[dk_off[kz_dim - 1] + center_sx * slab_ry_dim + center_sy] != center_val
+                        or slab_ptr[dk_off[krz] + (pi - 1) * str_val * slab_ry_dim + center_sy] != center_val
+                        or slab_ptr[dk_off[krz] + ((pi - 1) + kx - 1) * str_val * slab_ry_dim + center_sy] != center_val
+                        or slab_ptr[dk_off[krz] + center_sx * slab_ry_dim + (pj - 1) * str_val] != center_val
+                        or slab_ptr[dk_off[krz] + center_sx * slab_ry_dim + ((pj - 1) + ky - 1) * str_val] != center_val):
+                        acc = 0
+                        for di in range(kx):
+                            for dj in range(ky):
+                                for dk in range(kz_dim):
+                                    if kernel[di, dj, dk] == 0:
+                                        continue
+                                    slab_fi = ((pi - 1) + di) * str_val
+                                    slab_fj = ((pj - 1) + dj) * str_val
+                                    src_val = slab_ptr[dk_off[dk] + slab_fi * slab_ry_dim + slab_fj]
+                                    acc = acc + <short>(<short>src_val * <short>kernel[di, dj, dk])
+                        conv_val = <int>acc
+                        if conv_val > 127: conv_val = 127
+                        elif conv_val < -128: conv_val = -128
+                        slice_b[pi, pj] = <signed char>conv_val
+                        band_b[pi, pj] = 1
+                    else:
+                        slice_b[pi, pj] = <signed char>(<int>center_val * 127 + (<int>center_val >> 7))
+                        band_b[pi, pj] = 0
+
+    # ======= Main Z-sweep: MC on slice pairs + streaming convolution =======
+    for k in range(pz - 1):
+        # --- MC processing on (slice_a, slice_b) with int32 face-layer dedup ---
+        # OPT 18: i-outer, j-inner for cache-friendly face-layer access
+        for i in range(px - 1):
+            for j in range(py - 1):
+                # OPT 15: Skip non-surface cells
+                if (band_a[i, j] == 0 and band_a[i + 1, j] == 0
+                        and band_a[i, j + 1] == 0 and band_a[i + 1, j + 1] == 0
+                        and band_b[i, j] == 0 and band_b[i + 1, j] == 0
+                        and band_b[i, j + 1] == 0 and band_b[i + 1, j + 1] == 0):
+                    continue
+
+                corner_vals[0] = <float>slice_a[i, j]
+                corner_vals[1] = <float>slice_a[i + 1, j]
+                corner_vals[2] = <float>slice_a[i + 1, j + 1]
+                corner_vals[3] = <float>slice_a[i, j + 1]
+                corner_vals[4] = <float>slice_b[i, j]
+                corner_vals[5] = <float>slice_b[i + 1, j]
+                corner_vals[6] = <float>slice_b[i + 1, j + 1]
+                corner_vals[7] = <float>slice_b[i, j + 1]
+
+                cube_idx = 0
+                if corner_vals[0] > isovalue: cube_idx |= 1
+                if corner_vals[1] > isovalue: cube_idx |= 2
+                if corner_vals[2] > isovalue: cube_idx |= 4
+                if corner_vals[3] > isovalue: cube_idx |= 8
+                if corner_vals[4] > isovalue: cube_idx |= 16
+                if corner_vals[5] > isovalue: cube_idx |= 32
+                if corner_vals[6] > isovalue: cube_idx |= 64
+                if corner_vals[7] > isovalue: cube_idx |= 128
+
+                n_edges = ft[cube_idx, 0]
+                if n_edges == 0:
+                    continue
+
+                edges_mask = 0
+                need_edge12 = 0
+                for t_idx in range(n_edges):
+                    edge_buf[t_idx] = ft[cube_idx, 1 + t_idx]
+                    if edge_buf[t_idx] == 12:
+                        need_edge12 = 1
+                    elif 0 <= edge_buf[t_idx] < 12:
+                        edges_mask |= <unsigned short>(1 << edge_buf[t_idx])
+
+                # Look up or create vertex for each active edge
+                for e in range(12):
+                    if not (edges_mask & (1 << e)):
+                        edge_vids[e] = -1
+                        continue
+
+                    # Face-layer lookup (same mapping as sweep_mc_mesh)
+                    if e == 0: vid = lax[i, j]
+                    elif e == 1: vid = lay[i + 1, j]
+                    elif e == 2: vid = lax[i, j + 1]
+                    elif e == 3: vid = lay[i, j]
+                    elif e == 4: vid = lbx[i, j]
+                    elif e == 5: vid = lby[i + 1, j]
+                    elif e == 6: vid = lbx[i, j + 1]
+                    elif e == 7: vid = lby[i, j]
+                    elif e == 8: vid = zed[i, j]
+                    elif e == 9: vid = zed[i + 1, j]
+                    elif e == 10: vid = zed[i + 1, j + 1]
+                    else: vid = zed[i, j + 1]
+
+                    if vid >= 0:
+                        edge_vids[e] = vid
+                        continue
+
+                    # Create new vertex — interpolate
+                    if n_verts >= verts_np.shape[0]:
+                        new_size = verts_np.shape[0] * 2
+                        verts_np.resize((new_size, 3), refcheck=False)
+                        verts = verts_np
+
+                    v0_idx = _EDGE_V0[e]
+                    v1_idx = _EDGE_V1[e]
+                    v0_val = corner_vals[v0_idx]
+                    v1_val = corner_vals[v1_idx]
+                    if v0_val == v1_val:
+                        t_interp = 0.5
+                    else:
+                        t_interp = (isovalue - v0_val) / (v1_val - v0_val)
+                    verts[n_verts, 0] = mc_ox + mc_vsx * (
+                        <float>(i + _VTX_DI[v0_idx]) +
+                        t_interp * <float>(_VTX_DI[v1_idx] - _VTX_DI[v0_idx]))
+                    verts[n_verts, 1] = mc_oy + mc_vsy * (
+                        <float>(j + _VTX_DJ[v0_idx]) +
+                        t_interp * <float>(_VTX_DJ[v1_idx] - _VTX_DJ[v0_idx]))
+                    verts[n_verts, 2] = mc_oz + mc_vsz * (
+                        <float>(k + _VTX_DK[v0_idx]) +
+                        t_interp * <float>(_VTX_DK[v1_idx] - _VTX_DK[v0_idx]))
+
+                    vid = n_verts
+                    n_verts += 1
+                    edge_vids[e] = vid
+
+                    # Store in face-layer
+                    if e == 0: lax[i, j] = vid
+                    elif e == 1: lay[i + 1, j] = vid
+                    elif e == 2: lax[i, j + 1] = vid
+                    elif e == 3: lay[i, j] = vid
+                    elif e == 4: lbx[i, j] = vid
+                    elif e == 5: lby[i + 1, j] = vid
+                    elif e == 6: lbx[i, j + 1] = vid
+                    elif e == 7: lby[i, j] = vid
+                    elif e == 8: zed[i, j] = vid
+                    elif e == 9: zed[i + 1, j] = vid
+                    elif e == 10: zed[i + 1, j + 1] = vid
+                    else: zed[i, j + 1] = vid
+
+                # Edge 12: center vertex (inverse-distance weighted)
+                if need_edge12:
+                    if n_verts >= verts_np.shape[0]:
+                        new_size = verts_np.shape[0] * 2
+                        verts_np.resize((new_size, 3), refcheck=False)
+                        verts = verts_np
+                    wsum = 0.0
+                    verts[n_verts, 0] = 0.0
+                    verts[n_verts, 1] = 0.0
+                    verts[n_verts, 2] = 0.0
+                    for e in range(8):
+                        w_e = corner_vals[e] - isovalue
+                        if w_e < 0: w_e = -w_e
+                        w_e = 1.0 / (LEW_EPS + w_e)
+                        verts[n_verts, 0] += w_e * (mc_ox + mc_vsx * <float>(i + _VTX_DI[e]))
+                        verts[n_verts, 1] += w_e * (mc_oy + mc_vsy * <float>(j + _VTX_DJ[e]))
+                        verts[n_verts, 2] += w_e * (mc_oz + mc_vsz * <float>(k + _VTX_DK[e]))
+                        wsum += w_e
+                    if wsum > 0.0:
+                        verts[n_verts, 0] /= wsum
+                        verts[n_verts, 1] /= wsum
+                        verts[n_verts, 2] /= wsum
+                    edge_vids[12] = n_verts
+                    n_verts += 1
+
+                # Emit triangles: swap ei1/ei2 for outward normals
+                t_idx = 0
+                while t_idx < n_edges:
+                    if n_faces >= faces_np.shape[0]:
+                        new_size = faces_np.shape[0] * 2
+                        faces_np.resize((new_size, 3), refcheck=False)
+                        faces = faces_np
+                    faces[n_faces, 0] = edge_vids[edge_buf[t_idx]]
+                    faces[n_faces, 1] = edge_vids[edge_buf[t_idx + 2]]
+                    faces[n_faces, 2] = edge_vids[edge_buf[t_idx + 1]]
+                    n_faces += 1
+                    t_idx += 3
+
+        # --- Advance: compute next conv slice into slice_c ---
+        if k + 2 < pz:
+            if k + 2 >= pz - 1:
+                slice_c_np[:] = -1
+                slice_c = slice_c_np
+                band_c_np[:] = 0
+                band_c = band_c_np
+            else:
+                conv_k = k + 2 - 1
+                evict_slot = (conv_k - 1) % kz_dim
+                memset(slab_ptr + evict_slot * slab_slice_size,
+                       0xFF, slab_slice_size)
+                new_src_z = (conv_k + krz) * str_val
+                if new_src_z >= 0 and new_src_z < <int>rz:
+                    with nogil:
+                        for xi in prange(<int>rx, num_threads=n_threads,
+                                         schedule='static'):
+                            for yi in range(<int>ry):
+                                slab_bit_idx = (
+                                    <long long>xi +
+                                    <long long>yi * rx_ll +
+                                    <long long>new_src_z * rxy)
+                                if (src_ptr[slab_bit_idx >> 3] >>
+                                        (7 - <int>(slab_bit_idx & 7))) & 1:
+                                    slab_ptr[
+                                        evict_slot * slab_slice_size +
+                                        (xi + pad_x) * slab_ry_dim +
+                                        (yi + pad_y)] = 1
+                for dk in range(kz_dim):
+                    dk_off[dk] = ((conv_k + dk) % kz_dim) * slab_slice_size
+                with nogil:
+                    for pi in prange(px, num_threads=n_threads,
+                                     schedule='dynamic', chunksize=4):
+                        for pj in range(py):
+                            if (pi == 0 or pi == px - 1 or
+                                    pj == 0 or pj == py - 1):
+                                slice_c[pi, pj] = -1
+                            else:
+                                center_sx = ((pi - 1) + krx) * str_val
+                                center_sy = ((pj - 1) + kry) * str_val
+                                center_val = slab_ptr[
+                                    dk_off[krz] + center_sx * slab_ry_dim + center_sy]
+                                if (slab_ptr[dk_off[0] + center_sx * slab_ry_dim + center_sy] != center_val
+                                    or slab_ptr[dk_off[kz_dim - 1] + center_sx * slab_ry_dim + center_sy] != center_val
+                                    or slab_ptr[dk_off[krz] + (pi - 1) * str_val * slab_ry_dim + center_sy] != center_val
+                                    or slab_ptr[dk_off[krz] + ((pi - 1) + kx - 1) * str_val * slab_ry_dim + center_sy] != center_val
+                                    or slab_ptr[dk_off[krz] + center_sx * slab_ry_dim + (pj - 1) * str_val] != center_val
+                                    or slab_ptr[dk_off[krz] + center_sx * slab_ry_dim + ((pj - 1) + ky - 1) * str_val] != center_val):
+                                    acc = 0
+                                    for di in range(kx):
+                                        for dj in range(ky):
+                                            for dk in range(kz_dim):
+                                                if kernel[di, dj, dk] == 0:
+                                                    continue
+                                                slab_fi = ((pi - 1) + di) * str_val
+                                                slab_fj = ((pj - 1) + dj) * str_val
+                                                src_val = slab_ptr[
+                                                    dk_off[dk] + slab_fi * slab_ry_dim + slab_fj]
+                                                acc = acc + <short>(<short>src_val * <short>kernel[di, dj, dk])
+                                    conv_val = <int>acc
+                                    if conv_val > 127: conv_val = 127
+                                    elif conv_val < -128: conv_val = -128
+                                    slice_c[pi, pj] = <signed char>conv_val
+                                    band_c[pi, pj] = 1
+                                else:
+                                    slice_c[pi, pj] = <signed char>(
+                                        <int>center_val * 127 + (<int>center_val >> 7))
+                                    band_c[pi, pj] = 0
+
+        # --- Rotate slices and bands ---
+        temp_np = slice_a_np
+        slice_a_np = slice_b_np
+        slice_b_np = slice_c_np
+        slice_c_np = temp_np
+        slice_a = slice_a_np
+        slice_b = slice_b_np
+        slice_c = slice_c_np
+
+        temp_np = band_a_np
+        band_a_np = band_b_np
+        band_b_np = band_c_np
+        band_c_np = temp_np
+        band_a = band_a_np
+        band_b = band_b_np
+        band_c = band_c_np
+
+        # --- Swap face-layers: top->bottom, reset top+z ---
+        # CRITICAL: Update ALL memoryviews BEFORE any reset (commit 5bbfac1)
+        lax_np, lbx_np = lbx_np, lax_np
+        lay_np, lby_np = lby_np, lay_np
+        lax = lax_np
+        lay = lay_np
+        lbx = lbx_np
+        lby = lby_np
+        zed = zed_np
+        # Now reset new top layers and z-edges
+        lbx_np[:] = -1
+        lby_np[:] = -1
+        zed_np[:] = -1
+
+    return verts_np[:n_verts].copy(), faces_np[:n_faces].copy()

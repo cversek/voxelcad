@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from voxelcad import Sphere, Cube, Cylinder, GyroidCube
-from voxelcad._kernels import fused_stl_export
+from voxelcad._kernels import fused_stl_export, fused_mesh_export
 
 
 def _stl_tri_count(path):
@@ -263,3 +263,64 @@ class TestFusedVsFallbackConsistency:
         ratio = n_fused / n_cdt if n_cdt > 0 else 0
         assert 0.8 < ratio < 1.2, (
             f"fused={n_fused}, cdt={n_cdt}, ratio={ratio:.2f}")
+
+
+@pytest.mark.skipif(fused_mesh_export is None,
+                    reason="fused mesh kernel not compiled")
+class TestFusedMeshExport:
+    """Verify fused_mesh_export produces correct manifold meshes."""
+
+    VS = 10.0 / 32  # ~32^3 resolution
+
+    def _open_edge_count(self, mesh):
+        edges = mesh.extract_feature_edges(
+            boundary_edges=True, non_manifold_edges=True,
+            feature_edges=False, manifold_edges=False)
+        return edges.n_cells
+
+    def test_sphere_manifold(self):
+        """Fused mesh sphere should have 0 open edges."""
+        s = Sphere(r=5, voxel_size=self.VS)
+        m = s.render_surface_mesh(method='fast_smooth')
+        assert m.n_points > 0
+        assert m.n_cells > 0
+        assert self._open_edge_count(m) == 0
+
+    def test_gyroid_produces_mesh(self):
+        """Fused mesh gyroid should produce valid mesh matching STL path."""
+        g = GyroidCube(size=8, voxel_size=self.VS)
+        m = g.render_surface_mesh(method='fast_smooth')
+        assert m.n_points > 0
+        assert m.n_cells > 0
+        # Gyroid surface intersects grid boundary — open edges are
+        # expected. LCC filter (#108) will remove floating fragments.
+
+    def test_stride2(self):
+        """Stride=2 should produce valid manifold mesh."""
+        s = Sphere(r=5, voxel_size=self.VS)
+        m = s.render_surface_mesh(method='fast_smooth', mc_stride=2)
+        assert m.n_points > 0
+        assert m.n_cells > 0
+        assert self._open_edge_count(m) == 0
+
+    def test_matches_3stage_pipeline(self):
+        """Fused mesh should match 3-stage pipeline output."""
+        from voxelcad._kernels import fused_scale_convolve, sweep_mc_mesh
+        from voxelcad.utils.spectral import compute_butterworth_kernel
+        s = Sphere(r=5, voxel_size=self.VS)
+        s.render_volume()
+        rx, ry, rz = s.grid.res_vector
+        kern = compute_butterworth_kernel(order=4, cutoff=0.25, radius=3)
+        vsv = s.grid.voxel_size_vector
+        # 3-stage path
+        sf = fused_scale_convolve(s.voxel_data, rx, ry, rz, kern['int8'])
+        sf = sf[1:-1, 1:-1, 1:-1].copy()
+        v3, f3 = sweep_mc_mesh(sf, vsv[0], vsv[1], vsv[2])
+        # Fused path
+        vf, ff = fused_mesh_export(
+            s.voxel_data, rx, ry, rz, kern['int8'],
+            vsv[0], vsv[1], vsv[2])
+        assert vf.shape[0] == v3.shape[0], (
+            f"Vert count mismatch: fused={vf.shape[0]}, 3stage={v3.shape[0]}")
+        assert ff.shape[0] == f3.shape[0], (
+            f"Face count mismatch: fused={ff.shape[0]}, 3stage={f3.shape[0]}")

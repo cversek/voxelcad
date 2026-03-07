@@ -255,7 +255,7 @@ class VoxelModel:
         - 'fast_smooth': Fused scale + convolve (no CDT, faster, lower memory).
             Only supports isovalue=0.0 (zero-crossing). If isovalue != 0.0,
             falls back to 'cdt' automatically.
-        - 'auto': selects 'cdt' (will switch to 'fast_smooth' in future)
+        - 'auto': selects 'fast_smooth' (fused streaming pipeline)
 
         Args:
             isovalue: SDF threshold for isosurface extraction.
@@ -303,7 +303,7 @@ class VoxelModel:
                 f"Unknown method {method!r}. "
                 f"Use 'auto', 'cdt', or 'fast_smooth'.")
         if method == 'auto':
-            method = 'cdt'  # will switch to 'fast_smooth' in future
+            method = 'fast_smooth'
         if method == 'fast_smooth' and isovalue != 0.0:
             import warnings
             warnings.warn(
@@ -311,33 +311,64 @@ class VoxelModel:
                 f"{isovalue}). Falling back to CDT method.",
                 stacklevel=2)
             method = 'cdt'
-        # --- Scalar field computation (method-dependent) ---
-        # Both paths produce 'scalar_field': int8 array with zero-crossing
-        # at surface boundary, fed to marching cubes below.
+        # --- Surface extraction (method-dependent) ---
+        # fast_smooth with fused kernel produces pv_surf directly.
+        # All other paths produce 'scalar_field' for marching cubes below.
+        _fused_mesh_done = False
         if method == 'fast_smooth':
-            # Scaled smoothing: fused unpack + scale + convolve (no CDT)
-            _t0 = time.time()
-            from voxelcad._kernels import fused_scale_convolve as _fused_sc
-            if _fused_sc is None:
-                raise RuntimeError(
-                    "Scaled smoothing requires Cython extension. "
-                    "Run: python setup.py build_ext --inplace")
-            rx, ry, rz = self.grid.res_vector
-            from voxelcad.utils.spectral import compute_butterworth_kernel
-            kern = compute_butterworth_kernel(
-                order=lowpass_order, cutoff=lowpass_cutoff, radius=3)
-            LOGGER.info(f"\tFused scale+convolve on ({rx},{ry},{rz}) "
-                        f"stride={mc_stride} cutoff={lowpass_cutoff}...")
-            scalar_field = _fused_sc(
-                self.voxel_data, rx, ry, rz, kern['int8'],
-                stride=mc_stride)
-            # Strip padding for stride=1 (matches CDT path convention)
-            if mc_stride == 1:
-                scalar_field = scalar_field[1:-1, 1:-1, 1:-1].copy()
-            LOGGER.info(f"\t...fused kernel completed in "
-                        f"{time.time()-_t0:.1f} s, "
-                        f"shape={scalar_field.shape}, "
-                        f"dtype={scalar_field.dtype}")
+            # Try fully fused path (streaming, no intermediate SDF volume)
+            from voxelcad._kernels import fused_mesh_export as _fused_me
+            if _fused_me is not None:
+                _t0 = time.time()
+                rx, ry, rz = self.grid.res_vector
+                vsv = self.grid.voxel_size_vector
+                from voxelcad.utils.spectral import compute_butterworth_kernel
+                kern = compute_butterworth_kernel(
+                    order=lowpass_order, cutoff=lowpass_cutoff, radius=3)
+                LOGGER.info(f"\tFused mesh export on ({rx},{ry},{rz}) "
+                            f"stride={mc_stride} cutoff={lowpass_cutoff}...")
+                verts, faces = _fused_me(
+                    self.voxel_data, rx, ry, rz, kern['int8'],
+                    vsv[0], vsv[1], vsv[2],
+                    stride=mc_stride, isovalue=isovalue)
+                LOGGER.info(f"\t...fused mesh completed in "
+                            f"{time.time()-_t0:.1f} s "
+                            f"({faces.shape[0]} tris)")
+                import pyvista as pv
+                if faces.shape[0] > 0:
+                    pv_faces = np.column_stack([
+                        np.full(faces.shape[0], 3, dtype=np.int32),
+                        faces,
+                    ])
+                    pv_surf = pv.PolyData(verts, pv_faces)
+                else:
+                    pv_surf = pv.PolyData()
+                _fused_mesh_done = True
+            else:
+                # Fallback: 3-stage (scale+convolve -> MC below)
+                _t0 = time.time()
+                from voxelcad._kernels import (
+                    fused_scale_convolve as _fused_sc)
+                if _fused_sc is None:
+                    raise RuntimeError(
+                        "Scaled smoothing requires Cython extension. "
+                        "Run: python setup.py build_ext --inplace")
+                rx, ry, rz = self.grid.res_vector
+                from voxelcad.utils.spectral import compute_butterworth_kernel
+                kern = compute_butterworth_kernel(
+                    order=lowpass_order, cutoff=lowpass_cutoff, radius=3)
+                LOGGER.info(f"\tFused scale+convolve on ({rx},{ry},{rz}) "
+                            f"stride={mc_stride} cutoff={lowpass_cutoff}...")
+                scalar_field = _fused_sc(
+                    self.voxel_data, rx, ry, rz, kern['int8'],
+                    stride=mc_stride)
+                # Strip padding for stride=1 (matches CDT path convention)
+                if mc_stride == 1:
+                    scalar_field = scalar_field[1:-1, 1:-1, 1:-1].copy()
+                LOGGER.info(f"\t...fused kernel completed in "
+                            f"{time.time()-_t0:.1f} s, "
+                            f"shape={scalar_field.shape}, "
+                            f"dtype={scalar_field.dtype}")
         else:
             # CDT path: distance transform + Butterworth convolution
             _t0 = time.time()
@@ -419,39 +450,43 @@ class VoxelModel:
                     del D_fft
                     LOGGER.info(f"\t...filtering completed in "
                                 f"{time.time()-_t0:.1f} s")
-        # --- Marching cubes (shared by both paths) ---
-        vsv = self.grid.voxel_size_vector * mc_stride
-        _t0 = time.time()
-        from voxelcad._kernels import sweep_mc_mesh as _cython_mc
-        if _cython_mc is not None:
-            LOGGER.info(f"\tCython sweep-plane MC (isovalue={isovalue})...")
-            sf_c = np.ascontiguousarray(scalar_field)
-            del scalar_field
-            verts, faces = _cython_mc(
-                sf_c, vsv[0], vsv[1], vsv[2],
-                isovalue=isovalue)
-            del sf_c
-            import pyvista as pv
-            if faces.shape[0] > 0:
-                pv_faces = np.column_stack([
-                    np.full(faces.shape[0], 3, dtype=np.int32),
-                    faces,
-                ])
-                pv_surf = pv.PolyData(verts, pv_faces)
+        # --- Marching cubes (when fused path didn't produce mesh) ---
+        if not _fused_mesh_done:
+            vsv = self.grid.voxel_size_vector * mc_stride
+            _t0 = time.time()
+            from voxelcad._kernels import sweep_mc_mesh as _cython_mc
+            if _cython_mc is not None:
+                LOGGER.info(
+                    f"\tCython sweep-plane MC (isovalue={isovalue})...")
+                sf_c = np.ascontiguousarray(scalar_field)
+                del scalar_field
+                verts, faces = _cython_mc(
+                    sf_c, vsv[0], vsv[1], vsv[2],
+                    isovalue=isovalue)
+                del sf_c
+                import pyvista as pv
+                if faces.shape[0] > 0:
+                    pv_faces = np.column_stack([
+                        np.full(faces.shape[0], 3, dtype=np.int32),
+                        faces,
+                    ])
+                    pv_surf = pv.PolyData(verts, pv_faces)
+                else:
+                    pv_surf = pv.PolyData()
             else:
-                pv_surf = pv.PolyData()
-        else:
-            LOGGER.info(f"\tVTK contour (isovalue={isovalue})...")
-            rv = np.array(scalar_field.shape)
-            ugrid = UniformGrid()
-            ugrid.dimensions = rv
-            ugrid.spacing = vsv
-            ugrid.point_data['scalar_field'] = scalar_field.ravel(order='F')
-            del scalar_field
-            pv_surf = ugrid.contour([isovalue], scalars='scalar_field')
-            del ugrid
-        LOGGER.info(f"\t...MC completed in {time.time()-_t0:.1f} s "
-                    f"({pv_surf.n_cells} tris)")
+                LOGGER.info(f"\tVTK contour (isovalue={isovalue})...")
+                rv = np.array(scalar_field.shape)
+                ugrid = UniformGrid()
+                ugrid.dimensions = rv
+                ugrid.spacing = vsv
+                ugrid.point_data['scalar_field'] = (
+                    scalar_field.ravel(order='F'))
+                del scalar_field
+                pv_surf = ugrid.contour(
+                    [isovalue], scalars='scalar_field')
+                del ugrid
+            LOGGER.info(f"\t...MC completed in {time.time()-_t0:.1f} s "
+                        f"({pv_surf.n_cells} tris)")
         if only_largest_component and pv_surf.n_points > 0:
             _t0 = time.time()
             LOGGER.info(f"\textracting largest component "
