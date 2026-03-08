@@ -3543,6 +3543,7 @@ def fused_mesh_export(
     int stride=1,
     float isovalue=0.0,
     int n_threads=0,
+    int mc_threads=0,
 ):
     """Fully fused mesh export: packed bits -> (vertices, faces) arrays.
 
@@ -3675,8 +3676,13 @@ def fused_mesh_export(
     cdef long long slab_bit_idx
     cdef int dk_off[64]
 
+    cdef int total_cores = _detect_p_cores()
     if n_threads <= 0:
         n_threads = _get_fused_export_threads(px)
+    if mc_threads <= 0:
+        # Conv dominates; give MC just enough threads for prange edge precompute.
+        # Empirically: conv=14,mc=2 optimal on 16-core (Gyroid 0.72x of STL).
+        mc_threads = max(1, min(total_cores // 4, py - 1))
 
     # --- OPT 9: Slab buffer allocation and initial extraction ---
     slab_np = np.full((kz_dim, slab_rx_dim, slab_ry_dim), -1, dtype=np.int8)
@@ -3766,7 +3772,7 @@ def fused_mesh_export(
     mc_args.mc_vsy = mc_vsy
     mc_args.mc_vsz = mc_vsz
     mc_args.isovalue = isovalue
-    mc_args.mc_n_threads = _get_fused_export_threads(py - 1)
+    mc_args.mc_n_threads = mc_threads
     for _l in range(5):
         mc_args.layer_ptrs[_l] = layer_ptrs[_l]
         mc_args.layer_jstride[_l] = layer_jstride[_l]
