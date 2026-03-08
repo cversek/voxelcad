@@ -2835,6 +2835,7 @@ def fused_stl_export(
     int stride=1,
     float isovalue=0.0,
     int n_threads=0,
+    int mc_threads=0,
     int compute_normals=0,
 ):
     """Fully fused binary STL export: packed bits -> STL file on disk.
@@ -3014,8 +3015,11 @@ def fused_stl_export(
     cdef int _l
     cdef pthread_t mc_thread
 
+    cdef int total_cores = _detect_p_cores()
     if n_threads <= 0:
         n_threads = _get_fused_export_threads(px)
+    if mc_threads <= 0:
+        mc_threads = max(1, min(total_cores // 4, py - 1))
 
     # Open file with C-level I/O (no GIL needed for writes)
     cdef bytes fn_bytes = filename.encode('utf-8')
@@ -3164,7 +3168,7 @@ def fused_stl_export(
     # OPT 17: Normal elision flag
     mc_args.compute_normals = compute_normals
     # --- OPT 16: Set MC thread count and init write mutex ---
-    mc_args.mc_n_threads = _get_fused_export_threads(py - 1)
+    mc_args.mc_n_threads = mc_threads
     pthread_mutex_init(&mc_args.write_mutex, NULL)
 
     # --- OPT 10: Init pthread MC pipeline ---
