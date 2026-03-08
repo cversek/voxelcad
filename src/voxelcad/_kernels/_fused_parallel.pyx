@@ -18,7 +18,7 @@ import numpy as np
 cimport numpy as np
 from libc.math cimport cos, sin, fabs, sqrt, pow as cpow
 from libc.stdio cimport fopen, fwrite, fseek, fclose, FILE, SEEK_SET, fprintf, stderr
-from libc.string cimport memset
+from libc.string cimport memset, memcpy
 from libc.stdlib cimport malloc, free
 from cython.parallel cimport prange, threadid
 
@@ -3508,11 +3508,136 @@ cdef void _mc_mesh_emit_triangles(mc_args_t *a) noexcept nogil:
     a.mesh_n_faces = nf
 
 
+cdef void _mc_mesh_fused_assign_emit(mc_args_t *a) noexcept nogil:
+    """Fused assign+emit: assigns vertex IDs on demand during cell processing.
+    Eliminates separate face-layer scan pass. ID=-1 check naturally handles
+    first-layer (all fresh) vs subsequent layers (bottom from swap).
+    """
+    cdef int i, j, e, t_idx, cube_idx, n_edges, need_edge12
+    cdef float corner_vals[8]
+    cdef signed char edge_buf[36]
+    cdef unsigned short edges_mask
+    cdef int edge_vids[13]
+    cdef int vid, nv, nf, fl_li, id_off, fl_off
+    cdef int *id_p
+    cdef float *fl_p
+    cdef int py_val = a.py
+    cdef signed char *sa = a.slice_a
+    cdef signed char *sb = a.slice_b
+    cdef signed char *ft = a.ft
+    cdef int ft_nc = a.ft_ncols
+    cdef float iso = a.isovalue
+    cdef float w_e, wsum
+
+    nv = a.mesh_n_verts
+    nf = a.mesh_n_faces
+
+    for i in range(a.px - 1):
+        for j in range(a.py - 1):
+            # OPT 15: skip non-surface
+            if (a.band_a[i * py_val + j] == 0
+                    and a.band_a[(i + 1) * py_val + j] == 0
+                    and a.band_a[i * py_val + j + 1] == 0
+                    and a.band_a[(i + 1) * py_val + j + 1] == 0
+                    and a.band_b[i * py_val + j] == 0
+                    and a.band_b[(i + 1) * py_val + j] == 0
+                    and a.band_b[i * py_val + j + 1] == 0
+                    and a.band_b[(i + 1) * py_val + j + 1] == 0):
+                continue
+
+            corner_vals[0] = <float>sa[i * py_val + j]
+            corner_vals[1] = <float>sa[(i + 1) * py_val + j]
+            corner_vals[2] = <float>sa[(i + 1) * py_val + j + 1]
+            corner_vals[3] = <float>sa[i * py_val + j + 1]
+            corner_vals[4] = <float>sb[i * py_val + j]
+            corner_vals[5] = <float>sb[(i + 1) * py_val + j]
+            corner_vals[6] = <float>sb[(i + 1) * py_val + j + 1]
+            corner_vals[7] = <float>sb[i * py_val + j + 1]
+
+            cube_idx = 0
+            if corner_vals[0] > iso: cube_idx |= 1
+            if corner_vals[1] > iso: cube_idx |= 2
+            if corner_vals[2] > iso: cube_idx |= 4
+            if corner_vals[3] > iso: cube_idx |= 8
+            if corner_vals[4] > iso: cube_idx |= 16
+            if corner_vals[5] > iso: cube_idx |= 32
+            if corner_vals[6] > iso: cube_idx |= 64
+            if corner_vals[7] > iso: cube_idx |= 128
+
+            n_edges = ft[cube_idx * ft_nc]
+            if n_edges == 0:
+                continue
+
+            edges_mask = 0
+            need_edge12 = 0
+            for t_idx in range(n_edges):
+                edge_buf[t_idx] = ft[cube_idx * ft_nc + 1 + t_idx]
+                if edge_buf[t_idx] == 12:
+                    need_edge12 = 1
+                elif 0 <= edge_buf[t_idx] < 12:
+                    edges_mask |= <unsigned short>(1 << edge_buf[t_idx])
+
+            # Look up or assign vertex IDs on demand
+            for e in range(12):
+                if not (edges_mask & (1 << e)):
+                    edge_vids[e] = -1
+                    continue
+                fl_li = _EDGE_LAYER[e]
+                id_p = a.id_layers[fl_li]
+                id_off = (i + _EDGE_DI_OFF[e]) * a.id_jstride[fl_li] + (j + _EDGE_DJ_OFF[e])
+                vid = id_p[id_off]
+                if vid == -1:
+                    # On-demand assignment: check face-layer for non-NaN
+                    fl_p = a.layer_ptrs[fl_li]
+                    fl_off = (i + _EDGE_DI_OFF[e]) * a.layer_jstride[fl_li] + (j + _EDGE_DJ_OFF[e]) * 3
+                    if fl_p[fl_off] == fl_p[fl_off]:  # not NaN
+                        if nv < a.mesh_verts_cap:
+                            memcpy(&a.mesh_verts[nv * 3], &fl_p[fl_off], 12)  # M6: 3 floats
+                            id_p[id_off] = nv
+                            vid = nv
+                            nv += 1
+                edge_vids[e] = vid
+
+            # Edge 12: center vertex (cell-local)
+            if need_edge12:
+                if nv < a.mesh_verts_cap:
+                    wsum = 0.0
+                    a.mesh_verts[nv * 3] = 0.0
+                    a.mesh_verts[nv * 3 + 1] = 0.0
+                    a.mesh_verts[nv * 3 + 2] = 0.0
+                    for e in range(8):
+                        w_e = corner_vals[e] - iso
+                        if w_e < 0: w_e = -w_e
+                        w_e = 1.0 / (LEW_EPS + w_e)
+                        a.mesh_verts[nv * 3] += w_e * (a.mc_ox + a.mc_vsx * <float>(i + _VTX_DI[e]))
+                        a.mesh_verts[nv * 3 + 1] += w_e * (a.mc_oy + a.mc_vsy * <float>(j + _VTX_DJ[e]))
+                        a.mesh_verts[nv * 3 + 2] += w_e * (a.mc_oz + a.mc_vsz * <float>(a.k + _VTX_DK[e]))
+                        wsum += w_e
+                    if wsum > 0.0:
+                        a.mesh_verts[nv * 3] /= wsum
+                        a.mesh_verts[nv * 3 + 1] /= wsum
+                        a.mesh_verts[nv * 3 + 2] /= wsum
+                    edge_vids[12] = nv
+                    nv += 1
+
+            # Emit triangles (ei1/ei2 swap for outward normals)
+            t_idx = 0
+            while t_idx < n_edges:
+                if nf < a.mesh_faces_cap:
+                    a.mesh_faces[nf * 3] = edge_vids[edge_buf[t_idx]]
+                    a.mesh_faces[nf * 3 + 1] = edge_vids[edge_buf[t_idx + 2]]
+                    a.mesh_faces[nf * 3 + 2] = edge_vids[edge_buf[t_idx + 1]]
+                    nf += 1
+                t_idx += 3
+
+    a.mesh_n_verts = nv
+    a.mesh_n_faces = nf
+
+
 cdef void _mc_mesh_process_layer(mc_args_t *a, int is_first_layer) noexcept nogil:
-    """Three-step mesh MC: precompute edges -> assign IDs -> emit triangles."""
+    """Two-step mesh MC: precompute edges -> fused assign+emit."""
     _precompute_layer_edges(a, is_first_layer)
-    _mc_mesh_assign_ids(a, is_first_layer)
-    _mc_mesh_emit_triangles(a)
+    _mc_mesh_fused_assign_emit(a)
 
 
 cdef void* _mc_mesh_thread_func(void *arg) noexcept nogil:
@@ -3958,4 +4083,8 @@ def fused_mesh_export(
         pthread_cond_destroy(&mc_args.slice_ready)
         pthread_cond_destroy(&mc_args.mc_done)
 
-    return verts_np[:mc_args.mesh_n_verts].copy(), faces_np[:mc_args.mesh_n_faces].copy()
+    cdef int nv_final = mc_args.mesh_n_verts
+    cdef int nf_final = mc_args.mesh_n_faces
+    verts_np.resize((nv_final, 3), refcheck=False)
+    faces_np.resize((nf_final, 3), refcheck=False)
+    return verts_np, faces_np
