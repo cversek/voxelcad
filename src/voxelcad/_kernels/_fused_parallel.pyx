@@ -79,6 +79,15 @@ ctypedef struct mc_args_t:
     # OPT 16: Two-pass parallel MC
     int mc_n_threads
     pthread_mutex_t write_mutex
+    # Phase 4b: Mesh output (pthread mesh MC)
+    float *mesh_verts
+    int *mesh_faces
+    int mesh_n_verts
+    int mesh_n_faces
+    int mesh_verts_cap
+    int mesh_faces_cap
+    int *id_layers[5]
+    int id_jstride[5]
 
 np.import_array()
 
@@ -3349,6 +3358,183 @@ def fused_stl_export(
 # instead of float32 coordinate storage + STL output.
 # ---------------------------------------------------------------------------
 
+cdef void _mc_mesh_assign_ids(mc_args_t *a, int assign_bottom) noexcept nogil:
+    """Assign vertex IDs to pre-computed edge vertices in float32 face-layers.
+    Sequential — shared mesh_n_verts counter. Copies coords to mesh_verts.
+    For k>0, bottom layers (lax/lay) have IDs from previous layer's swap.
+    """
+    cdef int i, j, off, nv, li
+    cdef float *fl
+    cdef int *idl
+    cdef int imax, jmax
+    cdef int start_layer = 0 if assign_bottom else 2
+
+    nv = a.mesh_n_verts
+
+    for li in range(start_layer, 5):
+        fl = a.layer_ptrs[li]
+        idl = a.id_layers[li]
+        if li == 0 or li == 2:  # lax/lbx: (px-1, py)
+            imax = a.px - 1; jmax = a.py
+        elif li == 1 or li == 3:  # lay/lby: (px, py-1)
+            imax = a.px; jmax = a.py - 1
+        else:  # zed: (px, py)
+            imax = a.px; jmax = a.py
+
+        for i in range(imax):
+            for j in range(jmax):
+                off = i * a.layer_jstride[li] + j * 3
+                if fl[off] == fl[off]:  # not NaN
+                    if nv < a.mesh_verts_cap:
+                        a.mesh_verts[nv * 3] = fl[off]
+                        a.mesh_verts[nv * 3 + 1] = fl[off + 1]
+                        a.mesh_verts[nv * 3 + 2] = fl[off + 2]
+                        idl[i * a.id_jstride[li] + j] = nv
+                        nv += 1
+
+    a.mesh_n_verts = nv
+
+
+cdef void _mc_mesh_emit_triangles(mc_args_t *a) noexcept nogil:
+    """Emit triangles using pre-assigned vertex IDs from int32 face-layers."""
+    cdef int i, j, e, t_idx, cube_idx, n_edges, need_edge12
+    cdef float corner_vals[8]
+    cdef signed char edge_buf[36]
+    cdef unsigned short edges_mask
+    cdef int edge_vids[13]
+    cdef int vid, nv, nf, fl_li
+    cdef int *id_p
+    cdef int py_val = a.py
+    cdef signed char *sa = a.slice_a
+    cdef signed char *sb = a.slice_b
+    cdef signed char *ft = a.ft
+    cdef int ft_nc = a.ft_ncols
+    cdef float iso = a.isovalue
+    cdef float w_e, wsum
+
+    nv = a.mesh_n_verts
+    nf = a.mesh_n_faces
+
+    for i in range(a.px - 1):
+        for j in range(a.py - 1):
+            # OPT 15: skip non-surface
+            if (a.band_a[i * py_val + j] == 0
+                    and a.band_a[(i + 1) * py_val + j] == 0
+                    and a.band_a[i * py_val + j + 1] == 0
+                    and a.band_a[(i + 1) * py_val + j + 1] == 0
+                    and a.band_b[i * py_val + j] == 0
+                    and a.band_b[(i + 1) * py_val + j] == 0
+                    and a.band_b[i * py_val + j + 1] == 0
+                    and a.band_b[(i + 1) * py_val + j + 1] == 0):
+                continue
+
+            corner_vals[0] = <float>sa[i * py_val + j]
+            corner_vals[1] = <float>sa[(i + 1) * py_val + j]
+            corner_vals[2] = <float>sa[(i + 1) * py_val + j + 1]
+            corner_vals[3] = <float>sa[i * py_val + j + 1]
+            corner_vals[4] = <float>sb[i * py_val + j]
+            corner_vals[5] = <float>sb[(i + 1) * py_val + j]
+            corner_vals[6] = <float>sb[(i + 1) * py_val + j + 1]
+            corner_vals[7] = <float>sb[i * py_val + j + 1]
+
+            cube_idx = 0
+            if corner_vals[0] > iso: cube_idx |= 1
+            if corner_vals[1] > iso: cube_idx |= 2
+            if corner_vals[2] > iso: cube_idx |= 4
+            if corner_vals[3] > iso: cube_idx |= 8
+            if corner_vals[4] > iso: cube_idx |= 16
+            if corner_vals[5] > iso: cube_idx |= 32
+            if corner_vals[6] > iso: cube_idx |= 64
+            if corner_vals[7] > iso: cube_idx |= 128
+
+            n_edges = ft[cube_idx * ft_nc]
+            if n_edges == 0:
+                continue
+
+            edges_mask = 0
+            need_edge12 = 0
+            for t_idx in range(n_edges):
+                edge_buf[t_idx] = ft[cube_idx * ft_nc + 1 + t_idx]
+                if edge_buf[t_idx] == 12:
+                    need_edge12 = 1
+                elif 0 <= edge_buf[t_idx] < 12:
+                    edges_mask |= <unsigned short>(1 << edge_buf[t_idx])
+
+            # Look up vertex IDs from int32 face-layers
+            for e in range(12):
+                if not (edges_mask & (1 << e)):
+                    edge_vids[e] = -1
+                    continue
+                fl_li = _EDGE_LAYER[e]
+                id_p = a.id_layers[fl_li]
+                vid = id_p[
+                    (i + _EDGE_DI_OFF[e]) * a.id_jstride[fl_li] +
+                    (j + _EDGE_DJ_OFF[e])]
+                edge_vids[e] = vid
+
+            # Edge 12: center vertex (cell-local, not in face-layers)
+            if need_edge12:
+                if nv < a.mesh_verts_cap:
+                    wsum = 0.0
+                    a.mesh_verts[nv * 3] = 0.0
+                    a.mesh_verts[nv * 3 + 1] = 0.0
+                    a.mesh_verts[nv * 3 + 2] = 0.0
+                    for e in range(8):
+                        w_e = corner_vals[e] - iso
+                        if w_e < 0: w_e = -w_e
+                        w_e = 1.0 / (LEW_EPS + w_e)
+                        a.mesh_verts[nv * 3] += w_e * (a.mc_ox + a.mc_vsx * <float>(i + _VTX_DI[e]))
+                        a.mesh_verts[nv * 3 + 1] += w_e * (a.mc_oy + a.mc_vsy * <float>(j + _VTX_DJ[e]))
+                        a.mesh_verts[nv * 3 + 2] += w_e * (a.mc_oz + a.mc_vsz * <float>(a.k + _VTX_DK[e]))
+                        wsum += w_e
+                    if wsum > 0.0:
+                        a.mesh_verts[nv * 3] /= wsum
+                        a.mesh_verts[nv * 3 + 1] /= wsum
+                        a.mesh_verts[nv * 3 + 2] /= wsum
+                    edge_vids[12] = nv
+                    nv += 1
+
+            # Emit triangles (ei1/ei2 swap for outward normals)
+            t_idx = 0
+            while t_idx < n_edges:
+                if nf < a.mesh_faces_cap:
+                    a.mesh_faces[nf * 3] = edge_vids[edge_buf[t_idx]]
+                    a.mesh_faces[nf * 3 + 1] = edge_vids[edge_buf[t_idx + 2]]
+                    a.mesh_faces[nf * 3 + 2] = edge_vids[edge_buf[t_idx + 1]]
+                    nf += 1
+                t_idx += 3
+
+    a.mesh_n_verts = nv
+    a.mesh_n_faces = nf
+
+
+cdef void _mc_mesh_process_layer(mc_args_t *a, int is_first_layer) noexcept nogil:
+    """Three-step mesh MC: precompute edges -> assign IDs -> emit triangles."""
+    _precompute_layer_edges(a, is_first_layer)
+    _mc_mesh_assign_ids(a, is_first_layer)
+    _mc_mesh_emit_triangles(a)
+
+
+cdef void* _mc_mesh_thread_func(void *arg) noexcept nogil:
+    """Pthread entry for mesh MC processing."""
+    cdef mc_args_t *a = <mc_args_t*>arg
+    while True:
+        pthread_mutex_lock(&a.mutex)
+        while not a.mc_go and not a.terminate:
+            pthread_cond_wait(&a.slice_ready, &a.mutex)
+        if a.terminate:
+            pthread_mutex_unlock(&a.mutex)
+            return NULL
+        a.mc_go = 0
+        pthread_mutex_unlock(&a.mutex)
+        _mc_mesh_process_layer(a, a.k == 0)
+        pthread_mutex_lock(&a.mutex)
+        a.mc_finished = 1
+        pthread_cond_signal(&a.mc_done)
+        pthread_mutex_unlock(&a.mutex)
+    return NULL
+
+
 def fused_mesh_export(
     const unsigned char[::1] packed,
     long long rx, long long ry, long long rz,
@@ -3360,9 +3546,9 @@ def fused_mesh_export(
 ):
     """Fully fused mesh export: packed bits -> (vertices, faces) arrays.
 
-    Fuses scale+convolve + marching cubes with face-layer vertex dedup
-    into a single streaming kernel. Only 2 Z-slices of convolved output
-    are held in memory at a time -- no intermediate SDF volume.
+    Phase 4b: Uses pthread conv/MC overlap with two-pass nogil MC.
+    Pass 1: _precompute_layer_edges fills float32 face-layers (prange).
+    Pass 2: Sequential ID assignment + triangle emission via int32 ID layers.
 
     Args:
         packed: F-order packed binary volume (big-endian bitorder)
@@ -3437,39 +3623,45 @@ def fused_mesh_export(
     cdef int center_sx, center_sy
     cdef int conv_k, slab_fi, slab_fj
 
-    # --- Int32 face-layer arrays (from sweep_mc_mesh design) ---
-    lax_np = np.full((px - 1, py), -1, dtype=np.int32)
-    lay_np = np.full((px, py - 1), -1, dtype=np.int32)
-    lbx_np = np.full((px - 1, py), -1, dtype=np.int32)
-    lby_np = np.full((px, py - 1), -1, dtype=np.int32)
-    zed_np = np.full((px, py), -1, dtype=np.int32)
-    cdef int[:, ::1] lax = lax_np
-    cdef int[:, ::1] lay = lay_np
-    cdef int[:, ::1] lbx = lbx_np
-    cdef int[:, ::1] lby = lby_np
-    cdef int[:, ::1] zed = zed_np
+    # --- Float32 face-layer arrays (Phase 4b: two-pass nogil MC) ---
+    # Same topology as fused_stl_export: float32[3] coords with NaN sentinel
+    lax_np = np.full((px - 1, py, 3), np.nan, dtype=np.float32)
+    lay_np = np.full((px, py - 1, 3), np.nan, dtype=np.float32)
+    lbx_np = np.full((px - 1, py, 3), np.nan, dtype=np.float32)
+    lby_np = np.full((px, py - 1, 3), np.nan, dtype=np.float32)
+    zed_np = np.full((px, py, 3), np.nan, dtype=np.float32)
+    cdef float[:, :, ::1] lax = lax_np
+    cdef float[:, :, ::1] lay = lay_np
+    cdef float[:, :, ::1] lbx = lbx_np
+    cdef float[:, :, ::1] lby = lby_np
+    cdef float[:, :, ::1] zed = zed_np
 
-    # --- Output arrays (pre-allocated, grow as needed) ---
-    cdef int est_tris = max(4 * (px * py + py * pz + px * pz), 64)
+    # Parallel int32 ID face-layers (-1 sentinel = no vertex assigned)
+    id_lax_np = np.full((px - 1, py), -1, dtype=np.int32)
+    id_lay_np = np.full((px, py - 1), -1, dtype=np.int32)
+    id_lbx_np = np.full((px - 1, py), -1, dtype=np.int32)
+    id_lby_np = np.full((px, py - 1), -1, dtype=np.int32)
+    id_zed_np = np.full((px, py), -1, dtype=np.int32)
+    cdef int[:, ::1] id_lax = id_lax_np
+    cdef int[:, ::1] id_lay = id_lay_np
+    cdef int[:, ::1] id_lbx = id_lbx_np
+    cdef int[:, ::1] id_lby = id_lby_np
+    cdef int[:, ::1] id_zed = id_zed_np
+
+    # --- Output arrays (pre-allocated generously, resize at sync points) ---
+    cdef int est_tris = max(8 * (px * py + py * pz + px * pz), 1024)
     verts_np = np.empty((est_tris, 3), dtype=np.float32)
     faces_np = np.empty((est_tris, 3), dtype=np.int32)
-    cdef float[:, ::1] verts = verts_np
-    cdef int[:, ::1] faces = faces_np
-    cdef int n_verts = 0
-    cdef int n_faces = 0
+    cdef float[:, ::1] verts_mv = verts_np
+    cdef int[:, ::1] faces_mv = faces_np
     cdef int new_size
 
-    # MC variables
-    cdef int i, j, k, e, t_idx, vid
-    cdef int cube_idx
-    cdef unsigned short edges_mask
-    cdef float corner_vals[8]
-    cdef int edge_vids[13]
-    cdef float v0_val, v1_val, t_interp
-    cdef int v0_idx, v1_idx
-    cdef signed char edge_buf[36]
-    cdef int n_edges, need_edge12
-    cdef float w_e, wsum
+    # MC/pthread variables
+    cdef int k, _l
+    cdef mc_args_t mc_args
+    cdef pthread_t mc_thread
+    cdef float *tmp_fl_ptr
+    cdef int *tmp_id_ptr
 
     # Slab buffer variables (OPT 9)
     cdef int pad_x = krx * str_val
@@ -3548,154 +3740,81 @@ def fused_mesh_export(
                         slice_b[pi, pj] = <signed char>(<int>center_val * 127 + (<int>center_val >> 7))
                         band_b[pi, pj] = 0
 
-    # ======= Main Z-sweep: MC on slice pairs + streaming convolution =======
+    # --- Init face-layer jump table (float32 coords) ---
+    cdef float *layer_ptrs[5]
+    cdef int layer_jstride[5]
+    layer_jstride[0] = py * 3       # lax: (px-1, py, 3)
+    layer_jstride[1] = (py-1) * 3   # lay: (px, py-1, 3)
+    layer_jstride[2] = py * 3       # lbx: (px-1, py, 3)
+    layer_jstride[3] = (py-1) * 3   # lby: (px, py-1, 3)
+    layer_jstride[4] = py * 3       # zed: (px, py, 3)
+    layer_ptrs[0] = &lax[0, 0, 0]
+    layer_ptrs[1] = &lay[0, 0, 0]
+    layer_ptrs[2] = &lbx[0, 0, 0]
+    layer_ptrs[3] = &lby[0, 0, 0]
+    layer_ptrs[4] = &zed[0, 0, 0]
+
+    # --- Init mc_args_t for pthread mesh MC ---
+    mc_args.px = px
+    mc_args.py = py
+    mc_args.ft = <signed char*>&ft[0, 0]
+    mc_args.ft_ncols = ft.shape[1]
+    mc_args.mc_ox = mc_ox
+    mc_args.mc_oy = mc_oy
+    mc_args.mc_oz = mc_oz
+    mc_args.mc_vsx = mc_vsx
+    mc_args.mc_vsy = mc_vsy
+    mc_args.mc_vsz = mc_vsz
+    mc_args.isovalue = isovalue
+    mc_args.mc_n_threads = _get_fused_export_threads(py - 1)
+    for _l in range(5):
+        mc_args.layer_ptrs[_l] = layer_ptrs[_l]
+        mc_args.layer_jstride[_l] = layer_jstride[_l]
+
+    # ID layer pointers
+    mc_args.id_layers[0] = &id_lax[0, 0]
+    mc_args.id_layers[1] = &id_lay[0, 0]
+    mc_args.id_layers[2] = &id_lbx[0, 0]
+    mc_args.id_layers[3] = &id_lby[0, 0]
+    mc_args.id_layers[4] = &id_zed[0, 0]
+    mc_args.id_jstride[0] = py        # id_lax: (px-1, py)
+    mc_args.id_jstride[1] = py - 1    # id_lay: (px, py-1)
+    mc_args.id_jstride[2] = py        # id_lbx: (px-1, py)
+    mc_args.id_jstride[3] = py - 1    # id_lby: (px, py-1)
+    mc_args.id_jstride[4] = py        # id_zed: (px, py)
+
+    # Mesh output buffers
+    mc_args.mesh_verts = &verts_mv[0, 0]
+    mc_args.mesh_faces = &faces_mv[0, 0]
+    mc_args.mesh_n_verts = 0
+    mc_args.mesh_n_faces = 0
+    mc_args.mesh_verts_cap = est_tris
+    mc_args.mesh_faces_cap = est_tris
+
+    # --- Init pthread pipeline ---
+    mc_args.mc_go = 0
+    mc_args.mc_finished = 0
+    mc_args.terminate = 0
+    pthread_mutex_init(&mc_args.mutex, NULL)
+    pthread_cond_init(&mc_args.slice_ready, NULL)
+    pthread_cond_init(&mc_args.mc_done, NULL)
+    pthread_create(&mc_thread, NULL, _mc_mesh_thread_func, &mc_args)
+
+    # ======= Main Z-sweep: pthread MC on slice pairs + streaming conv =======
     for k in range(pz - 1):
-        # --- MC processing on (slice_a, slice_b) with int32 face-layer dedup ---
-        # OPT 18: i-outer, j-inner for cache-friendly face-layer access
-        for i in range(px - 1):
-            for j in range(py - 1):
-                # OPT 15: Skip non-surface cells
-                if (band_a[i, j] == 0 and band_a[i + 1, j] == 0
-                        and band_a[i, j + 1] == 0 and band_a[i + 1, j + 1] == 0
-                        and band_b[i, j] == 0 and band_b[i + 1, j] == 0
-                        and band_b[i, j + 1] == 0 and band_b[i + 1, j + 1] == 0):
-                    continue
+        mc_args.k = k
+        mc_args.slice_a = &slice_a[0, 0]
+        mc_args.slice_b = &slice_b[0, 0]
+        mc_args.band_a = &band_a[0, 0]
+        mc_args.band_b = &band_b[0, 0]
 
-                corner_vals[0] = <float>slice_a[i, j]
-                corner_vals[1] = <float>slice_a[i + 1, j]
-                corner_vals[2] = <float>slice_a[i + 1, j + 1]
-                corner_vals[3] = <float>slice_a[i, j + 1]
-                corner_vals[4] = <float>slice_b[i, j]
-                corner_vals[5] = <float>slice_b[i + 1, j]
-                corner_vals[6] = <float>slice_b[i + 1, j + 1]
-                corner_vals[7] = <float>slice_b[i, j + 1]
-
-                cube_idx = 0
-                if corner_vals[0] > isovalue: cube_idx |= 1
-                if corner_vals[1] > isovalue: cube_idx |= 2
-                if corner_vals[2] > isovalue: cube_idx |= 4
-                if corner_vals[3] > isovalue: cube_idx |= 8
-                if corner_vals[4] > isovalue: cube_idx |= 16
-                if corner_vals[5] > isovalue: cube_idx |= 32
-                if corner_vals[6] > isovalue: cube_idx |= 64
-                if corner_vals[7] > isovalue: cube_idx |= 128
-
-                n_edges = ft[cube_idx, 0]
-                if n_edges == 0:
-                    continue
-
-                edges_mask = 0
-                need_edge12 = 0
-                for t_idx in range(n_edges):
-                    edge_buf[t_idx] = ft[cube_idx, 1 + t_idx]
-                    if edge_buf[t_idx] == 12:
-                        need_edge12 = 1
-                    elif 0 <= edge_buf[t_idx] < 12:
-                        edges_mask |= <unsigned short>(1 << edge_buf[t_idx])
-
-                # Look up or create vertex for each active edge
-                for e in range(12):
-                    if not (edges_mask & (1 << e)):
-                        edge_vids[e] = -1
-                        continue
-
-                    # Face-layer lookup (same mapping as sweep_mc_mesh)
-                    if e == 0: vid = lax[i, j]
-                    elif e == 1: vid = lay[i + 1, j]
-                    elif e == 2: vid = lax[i, j + 1]
-                    elif e == 3: vid = lay[i, j]
-                    elif e == 4: vid = lbx[i, j]
-                    elif e == 5: vid = lby[i + 1, j]
-                    elif e == 6: vid = lbx[i, j + 1]
-                    elif e == 7: vid = lby[i, j]
-                    elif e == 8: vid = zed[i, j]
-                    elif e == 9: vid = zed[i + 1, j]
-                    elif e == 10: vid = zed[i + 1, j + 1]
-                    else: vid = zed[i, j + 1]
-
-                    if vid >= 0:
-                        edge_vids[e] = vid
-                        continue
-
-                    # Create new vertex — interpolate
-                    if n_verts >= verts_np.shape[0]:
-                        new_size = verts_np.shape[0] * 2
-                        verts_np.resize((new_size, 3), refcheck=False)
-                        verts = verts_np
-
-                    v0_idx = _EDGE_V0[e]
-                    v1_idx = _EDGE_V1[e]
-                    v0_val = corner_vals[v0_idx]
-                    v1_val = corner_vals[v1_idx]
-                    if v0_val == v1_val:
-                        t_interp = 0.5
-                    else:
-                        t_interp = (isovalue - v0_val) / (v1_val - v0_val)
-                    verts[n_verts, 0] = mc_ox + mc_vsx * (
-                        <float>(i + _VTX_DI[v0_idx]) +
-                        t_interp * <float>(_VTX_DI[v1_idx] - _VTX_DI[v0_idx]))
-                    verts[n_verts, 1] = mc_oy + mc_vsy * (
-                        <float>(j + _VTX_DJ[v0_idx]) +
-                        t_interp * <float>(_VTX_DJ[v1_idx] - _VTX_DJ[v0_idx]))
-                    verts[n_verts, 2] = mc_oz + mc_vsz * (
-                        <float>(k + _VTX_DK[v0_idx]) +
-                        t_interp * <float>(_VTX_DK[v1_idx] - _VTX_DK[v0_idx]))
-
-                    vid = n_verts
-                    n_verts += 1
-                    edge_vids[e] = vid
-
-                    # Store in face-layer
-                    if e == 0: lax[i, j] = vid
-                    elif e == 1: lay[i + 1, j] = vid
-                    elif e == 2: lax[i, j + 1] = vid
-                    elif e == 3: lay[i, j] = vid
-                    elif e == 4: lbx[i, j] = vid
-                    elif e == 5: lby[i + 1, j] = vid
-                    elif e == 6: lbx[i, j + 1] = vid
-                    elif e == 7: lby[i, j] = vid
-                    elif e == 8: zed[i, j] = vid
-                    elif e == 9: zed[i + 1, j] = vid
-                    elif e == 10: zed[i + 1, j + 1] = vid
-                    else: zed[i, j + 1] = vid
-
-                # Edge 12: center vertex (inverse-distance weighted)
-                if need_edge12:
-                    if n_verts >= verts_np.shape[0]:
-                        new_size = verts_np.shape[0] * 2
-                        verts_np.resize((new_size, 3), refcheck=False)
-                        verts = verts_np
-                    wsum = 0.0
-                    verts[n_verts, 0] = 0.0
-                    verts[n_verts, 1] = 0.0
-                    verts[n_verts, 2] = 0.0
-                    for e in range(8):
-                        w_e = corner_vals[e] - isovalue
-                        if w_e < 0: w_e = -w_e
-                        w_e = 1.0 / (LEW_EPS + w_e)
-                        verts[n_verts, 0] += w_e * (mc_ox + mc_vsx * <float>(i + _VTX_DI[e]))
-                        verts[n_verts, 1] += w_e * (mc_oy + mc_vsy * <float>(j + _VTX_DJ[e]))
-                        verts[n_verts, 2] += w_e * (mc_oz + mc_vsz * <float>(k + _VTX_DK[e]))
-                        wsum += w_e
-                    if wsum > 0.0:
-                        verts[n_verts, 0] /= wsum
-                        verts[n_verts, 1] /= wsum
-                        verts[n_verts, 2] /= wsum
-                    edge_vids[12] = n_verts
-                    n_verts += 1
-
-                # Emit triangles: swap ei1/ei2 for outward normals
-                t_idx = 0
-                while t_idx < n_edges:
-                    if n_faces >= faces_np.shape[0]:
-                        new_size = faces_np.shape[0] * 2
-                        faces_np.resize((new_size, 3), refcheck=False)
-                        faces = faces_np
-                    faces[n_faces, 0] = edge_vids[edge_buf[t_idx]]
-                    faces[n_faces, 1] = edge_vids[edge_buf[t_idx + 2]]
-                    faces[n_faces, 2] = edge_vids[edge_buf[t_idx + 1]]
-                    n_faces += 1
-                    t_idx += 3
+        # Signal MC thread to process current pair
+        with nogil:
+            pthread_mutex_lock(&mc_args.mutex)
+            mc_args.mc_go = 1
+            mc_args.mc_finished = 0
+            pthread_cond_signal(&mc_args.slice_ready)
+            pthread_mutex_unlock(&mc_args.mutex)
 
         # --- Advance: compute next conv slice into slice_c ---
         if k + 2 < pz:
@@ -3766,6 +3885,28 @@ def fused_mesh_export(
                                         <int>center_val * 127 + (<int>center_val >> 7))
                                     band_c[pi, pj] = 0
 
+
+        # Wait for MC to finish
+        with nogil:
+            pthread_mutex_lock(&mc_args.mutex)
+            while mc_args.mc_finished == 0:
+                pthread_cond_wait(&mc_args.mc_done, &mc_args.mutex)
+            pthread_mutex_unlock(&mc_args.mutex)
+
+        # --- Check capacity, resize if needed (GIL held) ---
+        if mc_args.mesh_n_verts > mc_args.mesh_verts_cap * 3 // 4:
+            new_size = mc_args.mesh_verts_cap * 2
+            verts_np.resize((new_size, 3), refcheck=False)
+            verts_mv = verts_np
+            mc_args.mesh_verts = &verts_mv[0, 0]
+            mc_args.mesh_verts_cap = new_size
+        if mc_args.mesh_n_faces > mc_args.mesh_faces_cap * 3 // 4:
+            new_size = mc_args.mesh_faces_cap * 2
+            faces_np.resize((new_size, 3), refcheck=False)
+            faces_mv = faces_np
+            mc_args.mesh_faces = &faces_mv[0, 0]
+            mc_args.mesh_faces_cap = new_size
+
         # --- Rotate slices and bands ---
         temp_np = slice_a_np
         slice_a_np = slice_b_np
@@ -3783,18 +3924,32 @@ def fused_mesh_export(
         band_b = band_b_np
         band_c = band_c_np
 
-        # --- Swap face-layers: top->bottom, reset top+z ---
-        # CRITICAL: Update ALL memoryviews BEFORE any reset (commit 5bbfac1)
-        lax_np, lbx_np = lbx_np, lax_np
-        lay_np, lby_np = lby_np, lay_np
-        lax = lax_np
-        lay = lay_np
-        lbx = lbx_np
-        lby = lby_np
-        zed = zed_np
-        # Now reset new top layers and z-edges
-        lbx_np[:] = -1
-        lby_np[:] = -1
-        zed_np[:] = -1
 
-    return verts_np[:n_verts].copy(), faces_np[:n_faces].copy()
+        # --- Swap face-layers: top->bottom, reset top+z (5bbfac1 pattern) ---
+        # CRITICAL: Update ALL struct pointers BEFORE memset
+        # Swap float32 coord layers
+        tmp_fl_ptr = mc_args.layer_ptrs[0]; mc_args.layer_ptrs[0] = mc_args.layer_ptrs[2]; mc_args.layer_ptrs[2] = tmp_fl_ptr
+        tmp_fl_ptr = mc_args.layer_ptrs[1]; mc_args.layer_ptrs[1] = mc_args.layer_ptrs[3]; mc_args.layer_ptrs[3] = tmp_fl_ptr
+        # Swap int32 ID layers
+        tmp_id_ptr = mc_args.id_layers[0]; mc_args.id_layers[0] = mc_args.id_layers[2]; mc_args.id_layers[2] = tmp_id_ptr
+        tmp_id_ptr = mc_args.id_layers[1]; mc_args.id_layers[1] = mc_args.id_layers[3]; mc_args.id_layers[3] = tmp_id_ptr
+        # Reset new top layers (NaN for float32, -1 for int32) and z-edges
+        memset(mc_args.layer_ptrs[2], 0xFF, (px - 1) * py * 3 * sizeof(float))      # lbx float32
+        memset(mc_args.layer_ptrs[3], 0xFF, px * (py - 1) * 3 * sizeof(float))      # lby float32
+        memset(mc_args.layer_ptrs[4], 0xFF, px * py * 3 * sizeof(float))             # zed float32
+        memset(mc_args.id_layers[2], 0xFF, (px - 1) * py * sizeof(int))              # id_lbx
+        memset(mc_args.id_layers[3], 0xFF, px * (py - 1) * sizeof(int))              # id_lby
+        memset(mc_args.id_layers[4], 0xFF, px * py * sizeof(int))                    # id_zed
+
+    # --- Teardown pthread ---
+    with nogil:
+        pthread_mutex_lock(&mc_args.mutex)
+        mc_args.terminate = 1
+        pthread_cond_signal(&mc_args.slice_ready)
+        pthread_mutex_unlock(&mc_args.mutex)
+        pthread_join(mc_thread, NULL)
+        pthread_mutex_destroy(&mc_args.mutex)
+        pthread_cond_destroy(&mc_args.slice_ready)
+        pthread_cond_destroy(&mc_args.mc_done)
+
+    return verts_np[:mc_args.mesh_n_verts].copy(), faces_np[:mc_args.mesh_n_faces].copy()
