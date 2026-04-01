@@ -413,10 +413,42 @@ class VoxelModel:
                             f"shape={scalar_field.shape}, "
                             f"dtype={scalar_field.dtype}")
         else:
-            # CDT path: distance transform + Butterworth convolution
+            # CDT path: try fused kernel with SDF input, fall back to 3-stage
             _t0 = time.time()
             from voxelcad._kernels import compute_sdf_cdt as _cython_sdf_cdt
-            if _cython_sdf_cdt is not None and self.voxel_data is not None:
+            from voxelcad._kernels import fused_mesh_export as _fused_me_cdt
+            if (_cython_sdf_cdt is not None
+                    and _fused_me_cdt is not None
+                    and self.voxel_data is not None):
+                rx, ry, rz = self.grid.res_vector
+                vsv = self.grid.voxel_size_vector
+                from voxelcad.utils.spectral import compute_butterworth_kernel
+                kern = compute_butterworth_kernel(
+                    order=lowpass_order, cutoff=lowpass_cutoff, radius=3)
+                LOGGER.info(f"\tCDT + fused mesh on ({rx},{ry},{rz}) "
+                            f"stride={mc_stride} iso={isovalue}...")
+                _sdf_int8 = _cython_sdf_cdt(
+                    self.voxel_data, rx, ry, rz, mc_stride)
+                verts, faces = _fused_me_cdt(
+                    self.voxel_data, rx, ry, rz, kern['int8'],
+                    vsv[0], vsv[1], vsv[2],
+                    stride=mc_stride, isovalue=isovalue,
+                    sdf_input=_sdf_int8)
+                LOGGER.info(f"\t...CDT + fused mesh completed in "
+                            f"{time.time()-_t0:.1f} s "
+                            f"({faces.shape[0]} tris)")
+                import pyvista as pv
+                if faces.shape[0] > 0:
+                    pv_faces = np.column_stack([
+                        np.full(faces.shape[0], 3, dtype=np.int32),
+                        faces,
+                    ])
+                    pv_surf = pv.PolyData(verts, pv_faces)
+                else:
+                    pv_surf = pv.PolyData()
+                _fused_mesh_done = True
+            elif _cython_sdf_cdt is not None and self.voxel_data is not None:
+                # Fallback: CDT + separate Butterworth + sweep_mc_mesh
                 rx, ry, rz = self.grid.res_vector
                 LOGGER.info(f"\tCython CDT int8 SDF on ({rx},{ry},{rz}) "
                             f"stride={mc_stride}...")
@@ -452,9 +484,9 @@ class VoxelModel:
                             f"{time.time()-_t0:.1f} s, "
                             f"shape={scalar_field.shape}, "
                             f"dtype={scalar_field.dtype}")
-            # Butterworth low-pass filter (CDT path only; scaled path
-            # includes convolution in the fused kernel)
-            if lowpass_cutoff > 0:
+            # Butterworth low-pass filter (CDT fallback path only;
+            # fused CDT path includes convolution in the kernel)
+            if lowpass_cutoff > 0 and not _fused_mesh_done:
                 _t0 = time.time()
                 from voxelcad._kernels import (
                     convolve_sdf_spatial as _cython_conv)
@@ -738,24 +770,37 @@ class VoxelModel:
             # Fully fused STL: packed bits -> STL file (no intermediates)
             # Only for fast_smooth-compatible requests (iso=0.0)
             from voxelcad._kernels import fused_stl_export as _fused_stl
-            use_fused = (
+            from voxelcad._kernels import compute_sdf_cdt as _cdt_stl
+            use_fused_packed = (
                 _fused_stl is not None
                 and method in ('auto', 'fast_smooth')
                 and isovalue == 0.0
             )
-            if use_fused and not only_largest:
+            use_fused_cdt = (
+                _fused_stl is not None
+                and _cdt_stl is not None
+                and method == 'cdt'
+            )
+            if (use_fused_packed or use_fused_cdt) and not only_largest:
                 _t0 = time.time()
-                LOGGER.info(f"\tfused STL export (no intermediate volumes)...")
                 from voxelcad.utils.spectral import compute_butterworth_kernel
                 rx, ry, rz = self.grid.res_vector
                 kern = compute_butterworth_kernel(
                     order=lowpass_order, cutoff=lowpass_cutoff, radius=3)
                 vsv = self.grid.voxel_size_vector
+                _sdf_arg = None
+                if use_fused_cdt:
+                    LOGGER.info(f"\tCDT + fused STL export...")
+                    _sdf_arg = _cdt_stl(
+                        self.voxel_data, rx, ry, rz, mc_stride)
+                else:
+                    LOGGER.info(f"\tfused STL export (no intermediate volumes)...")
                 n_tris = _fused_stl(
                     self.voxel_data, rx, ry, rz, kern['int8'],
                     vsv[0], vsv[1], vsv[2], filename,
                     stride=mc_stride, isovalue=isovalue,
-                    compute_normals=int(compute_normals))
+                    compute_normals=int(compute_normals),
+                    sdf_input=_sdf_arg)
                 LOGGER.info(f"\t...fused STL completed: {n_tris} tris "
                             f"in {time.time()-_t0:.2f} s")
             else:
