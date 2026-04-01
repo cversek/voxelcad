@@ -277,7 +277,7 @@ class VoxelModel:
             mc_stride: Subsample factor for the distance field (default 1).
 
         Returns:
-            pv.ImageData with cell_data['cdt_distance'] (float32, mm).
+            pv.ImageData with point_data['cdt_distance'] (float32, mm).
         """
         if self.voxel_data is None:
             self.render_volume()
@@ -288,11 +288,11 @@ class VoxelModel:
             self.voxel_data, rx, ry, rz, stride=mc_stride,
             voxel_size=vsv)
         ugrid = UniformGrid()
-        ugrid.dimensions = np.array(cdt.shape) + 1
+        ugrid.dimensions = np.array(cdt.shape)
         ugrid.spacing = vsv * mc_stride
         ugrid.origin = np.array([
             self.grid.xlim[0], self.grid.ylim[0], self.grid.zlim[0]])
-        ugrid.cell_data['cdt_distance'] = cdt.ravel(order='F')
+        ugrid.point_data['cdt_distance'] = cdt.ravel(order='F')
         return ugrid
 
     def render_volume_mesh(self, cache=True):
