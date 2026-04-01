@@ -261,6 +261,40 @@ class VoxelModel:
         TIMING_END("render_uniform_grid")
         return ugrid
 
+    def render_cdt_grid(self, mc_stride=1):
+        """Return ImageData with float32 CDT distance field in real units (mm).
+
+        The chamfer distance transform (chessboard metric) produces a signed
+        distance field: positive inside, negative outside. Distances are
+        scaled from voxel units to real metric units using voxel_size.
+
+        Useful for multi-isovalue visualization::
+
+            grid = model.render_cdt_grid(mc_stride=2)
+            contours = grid.contour([0.0, 0.5, 1.0], scalars='cdt_distance')
+
+        Args:
+            mc_stride: Subsample factor for the distance field (default 1).
+
+        Returns:
+            pv.ImageData with cell_data['cdt_distance'] (float32, mm).
+        """
+        if self.voxel_data is None:
+            self.render_volume()
+        from voxelcad._kernels import compute_cdt_field
+        rx, ry, rz = self.grid.res_vector
+        vsv = self.grid.voxel_size_vector
+        cdt = compute_cdt_field(
+            self.voxel_data, rx, ry, rz, stride=mc_stride,
+            voxel_size=vsv)
+        ugrid = UniformGrid()
+        ugrid.dimensions = np.array(cdt.shape) + 1
+        ugrid.spacing = vsv * mc_stride
+        ugrid.origin = np.array([
+            self.grid.xlim[0], self.grid.ylim[0], self.grid.zlim[0]])
+        ugrid.cell_data['cdt_distance'] = cdt.ravel(order='F')
+        return ugrid
+
     def render_volume_mesh(self, cache=True):
         #REF https://stackoverflow.com/questions/6030098/how-to-display-a-3d-plot-of-a-3d-array-isosurface-in-matplotlib-mplot3d-or-simil/35472146
         TIMING_START("render_volume_mesh")
