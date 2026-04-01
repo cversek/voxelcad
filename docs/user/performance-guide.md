@@ -116,3 +116,64 @@ python setup.py build_ext --inplace 2>&1 | grep -i openmp
 ```
 
 If OpenMP isn't available, kernels run single-threaded - still much faster than NumPy.
+
+## STL Export Pipeline
+
+VoxelCAD uses a fully fused Cython pipeline for STL and mesh export. Both paths share the same conv+MC backend: surface-band skip, face-layer vertex deduplication, pthread conv/MC overlap, and auto-tuned thread partitioning.
+
+### Two Export Paths
+
+| | Fast Path (`method='auto'`) | Precision Path (`method='cdt'`) |
+|---|---|---|
+| **Input** | Packed binary bits | CDT signed distance field (int8) |
+| **Smoothing** | Scaled {-1,+1} + Butterworth convolution | CDT distances + Butterworth convolution |
+| **Isovalue** | 0.0 only | Any value (offset surfaces) |
+| **Speed** | Fastest | ~1.5-2x slower at 256+ |
+| **Peak memory** | ~5 MB (streaming, no intermediate volumes) | SDF volume + ~5 MB streaming (see table below) |
+| **Use case** | Standard export, 3D printing | Offset surfaces, toleranced fits |
+
+The fast path streams directly from packed bits — peak memory is ~5 MB regardless of model size. The CDT path materializes the full signed distance field (int8, at stride resolution) before streaming it through the shared conv+MC backend. The `render_cdt_grid()` method additionally casts to float32, doubling the volume memory.
+
+### Export Performance (GyroidCube, stride=2, 16 cores)
+
+| Resolution | Fast STL | CDT STL | Fast Mesh | CDT Mesh | CDT SDF memory |
+|------------|----------|---------|-----------|----------|----------------|
+| 128^3 | 20 ms | 24 ms | 26 ms | 27 ms | 0.3 MB (int8) |
+| 256^3 | 86 ms | 242 ms | 139 ms | 241 ms | 2.2 MB (int8) |
+| 384^3 | 205 ms | 535 ms | 659 ms | 1019 ms | 7.2 MB (int8) |
+| 512^3 | 470 ms | 997 ms | 1074 ms | 1931 ms | 17 MB (int8) |
+
+CDT SDF memory = `(ceil(res/stride) + 2)^3` bytes (int8). For `render_cdt_grid()`, double these values (float32 output). The fast path uses ~5 MB peak regardless of resolution.
+
+At 128^3, the CDT path is essentially free. At larger scales, the overhead is primarily from conservative surface-band detection in the CDT path (all cells processed), not the CDT computation itself.
+
+### Export Parameters
+
+```python
+model.export("output.stl",
+    method='auto',        # 'auto', 'fast_smooth', or 'cdt'
+    mc_stride=2,          # subsample factor (2 = half resolution MC)
+    isovalue=0.0,         # surface offset (CDT only, in mm)
+    lowpass_cutoff=0.25,  # Butterworth cutoff (cycles/voxel)
+    lowpass_order=4,      # Butterworth filter order
+    compute_normals=False, # include face normals in STL
+)
+```
+
+`mc_stride=2` is the default and recommended for most use cases. It halves the MC grid resolution (8x fewer cells) while preserving surface quality thanks to the Butterworth low-pass filter whose cutoff (0.25 cycles/voxel) matches the stride-2 Nyquist frequency.
+
+### CDT Distance Field
+
+For advanced workflows, access the distance field directly:
+
+```python
+from voxelcad._kernels import compute_cdt_field
+
+# Float32 distances in mm
+cdt = compute_cdt_field(model.voxel_data, *model.grid.res_vector,
+                        stride=2, voxel_size=model.grid.voxel_size_vector)
+
+# Or as a PyVista volume for visualization
+grid = model.render_cdt_grid(mc_stride=2)
+contours = grid.contour([0.0, 0.5, 1.0], scalars='cdt_distance')
+```

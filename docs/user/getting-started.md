@@ -76,6 +76,38 @@ model.export("output.stl")
 
 The exported STL can be loaded into any slicer for 3D printing.
 
+### Export Methods
+
+VoxelCAD has two export paths:
+
+```python
+# Fast path (default): binary scaled smoothing, isovalue=0 only
+model.export("fast.stl")                       # method='auto'
+model.export("fast.stl", method='fast_smooth')  # explicit
+
+# Precision path: CDT distance field, supports non-zero isovalue
+model.export("precise.stl", method='cdt')
+model.export("offset.stl", method='cdt', isovalue=1.0)  # offset surface
+```
+
+Use `method='cdt'` when you need offset surfaces (shell walls, toleranced fits)
+or the highest geometric accuracy. The default `'auto'` is fastest for standard export.
+
+### CDT Distance Field
+
+The CDT (chamfer distance transform) produces a signed distance field that
+enables multi-isovalue surface extraction:
+
+```python
+# Get the distance field as a PyVista volume
+grid = model.render_cdt_grid(mc_stride=2)
+
+# Extract surfaces at multiple distances from the boundary
+contours = grid.contour([0.0, 0.5, 1.0], scalars='cdt_distance')
+```
+
+The `cdt_distance` values are in real units (mm, matching STL convention).
+
 ## Resolution and Memory
 
 | voxel_size | Grid for r=5 sphere | Memory (packed) | Render time (Cython) |
