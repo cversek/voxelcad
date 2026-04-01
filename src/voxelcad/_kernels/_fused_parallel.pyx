@@ -2826,6 +2826,34 @@ cdef void _mc_process_layer_two_pass(mc_args_t *a, int is_first_layer) noexcept 
     _mc_assemble_triangles_parallel(a)
 
 
+cdef inline signed char _conv_at_sdf(
+    const signed char *sdf_p, int sdf_yz, int sdf_z,
+    int pi, int pj, int out_z, int kr,
+    const signed char *kern_p, int kx, int ky, int kz_dim, int kern_jk,
+) noexcept nogil:
+    """Convolve one output position from a padded SDF array (Phase 95a)."""
+    cdef short acc = 0
+    cdef int di, dj, dk, sdf_xi, sdf_yj
+    cdef signed char kern_val
+    for di in range(kx):
+        sdf_xi = (pi - 1 + di + kr) * sdf_yz
+        for dj in range(ky):
+            sdf_yj = (pj - 1 + dj + kr) * sdf_z
+            for dk in range(kz_dim):
+                kern_val = kern_p[di * kern_jk + dj * kz_dim + dk]
+                if kern_val == 0:
+                    continue
+                acc = acc + <short>(
+                    <short>sdf_p[sdf_xi + sdf_yj + (out_z - 1 + dk + kr)] *
+                    <short>kern_val)
+    cdef int conv_val = <int>acc
+    if conv_val > 127:
+        conv_val = 127
+    elif conv_val < -128:
+        conv_val = -128
+    return <signed char>conv_val
+
+
 def fused_stl_export(
     const unsigned char[::1] packed,
     long long rx, long long ry, long long rz,
@@ -2837,6 +2865,7 @@ def fused_stl_export(
     int n_threads=0,
     int mc_threads=0,
     int compute_normals=0,
+    const signed char[:, :, ::1] sdf_input=None,
 ):
     """Fully fused binary STL export: packed bits -> STL file on disk.
 
@@ -3014,12 +3043,32 @@ def fused_stl_export(
     cdef mc_args_t mc_args
     cdef int _l
     cdef pthread_t mc_thread
+    # --- Phase 95a: SDF input support ---
+    cdef int use_sdf = 0
+    cdef signed char *sdf_ptr = NULL
+    cdef int sdf_yz = 0, sdf_z = 0
+    cdef const signed char *kern_ptr = &kernel[0, 0, 0]
+    cdef int kern_jk = ky * kz_dim
+    cdef signed char[:, :, ::1] _sdf_mv
+    cdef signed char[:, :, ::1] slab_view
 
     cdef int total_cores = _detect_p_cores()
     if n_threads <= 0:
         n_threads = _get_fused_export_threads(px)
     if mc_threads <= 0:
         mc_threads = max(1, min(total_cores // 4, py - 1))
+
+    # --- SDF input path setup (for CDT precision path) ---
+    if sdf_input is not None:
+        use_sdf = 1
+        _sdf_pad_np = np.pad(
+            np.asarray(sdf_input), krx,
+            mode='constant', constant_values=np.int8(-128))
+        _sdf_pad_np = np.ascontiguousarray(_sdf_pad_np, dtype=np.int8)
+        _sdf_mv = _sdf_pad_np
+        sdf_ptr = &_sdf_mv[0, 0, 0]
+        sdf_yz = _sdf_pad_np.shape[1] * _sdf_pad_np.shape[2]
+        sdf_z = _sdf_pad_np.shape[2]
 
     # Open file with C-level I/O (no GIL needed for writes)
     cdef bytes fn_bytes = filename.encode('utf-8')
@@ -3038,99 +3087,116 @@ def fused_stl_export(
         c_header[hi] = <unsigned char>hdr_str[hi]
     fwrite(c_header, 1, 84, fp)
 
-    # --- OPT 9: Allocate slab buffer and extract initial Z-slices ---
-    # Circular buffer of kz_dim int8 Z-slices, padded in X/Y to eliminate
-    # bounds checks. Pre-filled with -1 (outside = -1 convention).
-    slab_np = np.full((kz_dim, slab_rx_dim, slab_ry_dim), -1, dtype=np.int8)
-    cdef signed char[:, :, ::1] slab_view = slab_np
-    slab_ptr = &slab_view[0, 0, 0]
-
-    # Extract initial kz_dim source Z-slices into slab
-    conv_k = 0
-    for dk in range(kz_dim):
-        src_z = (conv_k + dk - krz) * str_val
-        if src_z < 0 or src_z >= <int>rz:
-            continue  # slot stays -1 (padding)
-        slab_slot = (conv_k + dk) % kz_dim
+    # --- SDF input: compute initial slice_b directly from padded SDF ---
+    if use_sdf:
         with nogil:
-            for xi in prange(<int>rx, num_threads=n_threads, schedule='static'):
-                for yi in range(<int>ry):
-                    slab_bit_idx = (
-                        <long long>xi +
-                        <long long>yi * rx_ll +
-                        <long long>src_z * rxy)
-                    if (src_ptr[slab_bit_idx >> 3] >>
-                            (7 - <int>(slab_bit_idx & 7))) & 1:
-                        slab_ptr[slab_slot * slab_slice_size +
-                                 (xi + pad_x) * slab_ry_dim + (yi + pad_y)] = 1
-
-    # --- Compute initial slice_b (z=1) using slab ---
-    # Precompute slot offsets to eliminate modulo from inner loop
-    for dk in range(kz_dim):
-        dk_off[dk] = ((conv_k + dk) % kz_dim) * slab_slice_size
-    with nogil:
-        for pi in prange(px, num_threads=n_threads, schedule='dynamic', chunksize=4):
-            for pj in range(py):
-                if pi == 0 or pi == px - 1 or pj == 0 or pj == py - 1:
-                    slice_b[pi, pj] = -1
-                else:
-                    # OPT 13: 6-point axis probe — detect surface band
-                    center_sx = ((pi - 1) + krx) * str_val
-                    center_sy = ((pj - 1) + kry) * str_val
-                    center_val = slab_ptr[
-                        dk_off[krz] +
-                        center_sx * slab_ry_dim + center_sy]
-                    if (slab_ptr[dk_off[0] +
-                                 center_sx * slab_ry_dim + center_sy]
-                            != center_val
-                        or slab_ptr[dk_off[kz_dim - 1] +
-                                    center_sx * slab_ry_dim + center_sy]
-                            != center_val
-                        or slab_ptr[dk_off[krz] +
-                                    (pi - 1) * str_val * slab_ry_dim +
-                                    center_sy]
-                            != center_val
-                        or slab_ptr[dk_off[krz] +
-                                    ((pi - 1) + kx - 1) * str_val *
-                                    slab_ry_dim + center_sy]
-                            != center_val
-                        or slab_ptr[dk_off[krz] +
-                                    center_sx * slab_ry_dim +
-                                    (pj - 1) * str_val]
-                            != center_val
-                        or slab_ptr[dk_off[krz] +
-                                    center_sx * slab_ry_dim +
-                                    ((pj - 1) + ky - 1) * str_val]
-                            != center_val):
-                        # Surface band: full convolution
-                        acc = 0
-                        for di in range(kx):
-                            for dj in range(ky):
-                                for dk in range(kz_dim):
-                                    if kernel[di, dj, dk] == 0:
-                                        continue
-                                    slab_fi = ((pi - 1) + di) * str_val
-                                    slab_fj = ((pj - 1) + dj) * str_val
-                                    src_val = slab_ptr[
-                                        dk_off[dk] +
-                                        slab_fi * slab_ry_dim + slab_fj]
-                                    acc = acc + <short>(
-                                        <short>src_val *
-                                        <short>kernel[di, dj, dk])
-                        conv_val = <int>acc
-                        if conv_val > 127:
-                            conv_val = 127
-                        elif conv_val < -128:
-                            conv_val = -128
-                        slice_b[pi, pj] = <signed char>conv_val
-                        band_b[pi, pj] = 1  # OPT 15: surface
+            for pi in prange(px, num_threads=n_threads, schedule='dynamic', chunksize=4):
+                for pj in range(py):
+                    if pi == 0 or pi == px - 1 or pj == 0 or pj == py - 1:
+                        slice_b[pi, pj] = -1
+                        band_b[pi, pj] = 0
                     else:
-                        # Interior/exterior: branchless constant fill
-                        slice_b[pi, pj] = <signed char>(
-                            <int>center_val * 127 +
-                            (<int>center_val >> 7))
-                        band_b[pi, pj] = 0  # OPT 15: non-surface
+                        slice_b[pi, pj] = _conv_at_sdf(
+                            sdf_ptr, sdf_yz, sdf_z,
+                            pi, pj, 1, krx,
+                            kern_ptr, kx, ky, kz_dim, kern_jk)
+                        band_b[pi, pj] = 1
 
+    # --- Packed-bit path: slab-based convolution ---
+    if not use_sdf:
+        # --- OPT 9: Allocate slab buffer and extract initial Z-slices ---
+        # Circular buffer of kz_dim int8 Z-slices, padded in X/Y to eliminate
+        # bounds checks. Pre-filled with -1 (outside = -1 convention).
+        slab_np = np.full((kz_dim, slab_rx_dim, slab_ry_dim), -1, dtype=np.int8)
+        slab_view = slab_np
+        slab_ptr = &slab_view[0, 0, 0]
+    
+        # Extract initial kz_dim source Z-slices into slab
+        conv_k = 0
+        for dk in range(kz_dim):
+            src_z = (conv_k + dk - krz) * str_val
+            if src_z < 0 or src_z >= <int>rz:
+                continue  # slot stays -1 (padding)
+            slab_slot = (conv_k + dk) % kz_dim
+            with nogil:
+                for xi in prange(<int>rx, num_threads=n_threads, schedule='static'):
+                    for yi in range(<int>ry):
+                        slab_bit_idx = (
+                            <long long>xi +
+                            <long long>yi * rx_ll +
+                            <long long>src_z * rxy)
+                        if (src_ptr[slab_bit_idx >> 3] >>
+                                (7 - <int>(slab_bit_idx & 7))) & 1:
+                            slab_ptr[slab_slot * slab_slice_size +
+                                     (xi + pad_x) * slab_ry_dim + (yi + pad_y)] = 1
+    
+        # --- Compute initial slice_b (z=1) using slab ---
+        # Precompute slot offsets to eliminate modulo from inner loop
+        for dk in range(kz_dim):
+            dk_off[dk] = ((conv_k + dk) % kz_dim) * slab_slice_size
+        with nogil:
+            for pi in prange(px, num_threads=n_threads, schedule='dynamic', chunksize=4):
+                for pj in range(py):
+                    if pi == 0 or pi == px - 1 or pj == 0 or pj == py - 1:
+                        slice_b[pi, pj] = -1
+                    else:
+                        # OPT 13: 6-point axis probe — detect surface band
+                        center_sx = ((pi - 1) + krx) * str_val
+                        center_sy = ((pj - 1) + kry) * str_val
+                        center_val = slab_ptr[
+                            dk_off[krz] +
+                            center_sx * slab_ry_dim + center_sy]
+                        if (slab_ptr[dk_off[0] +
+                                     center_sx * slab_ry_dim + center_sy]
+                                != center_val
+                            or slab_ptr[dk_off[kz_dim - 1] +
+                                        center_sx * slab_ry_dim + center_sy]
+                                != center_val
+                            or slab_ptr[dk_off[krz] +
+                                        (pi - 1) * str_val * slab_ry_dim +
+                                        center_sy]
+                                != center_val
+                            or slab_ptr[dk_off[krz] +
+                                        ((pi - 1) + kx - 1) * str_val *
+                                        slab_ry_dim + center_sy]
+                                != center_val
+                            or slab_ptr[dk_off[krz] +
+                                        center_sx * slab_ry_dim +
+                                        (pj - 1) * str_val]
+                                != center_val
+                            or slab_ptr[dk_off[krz] +
+                                        center_sx * slab_ry_dim +
+                                        ((pj - 1) + ky - 1) * str_val]
+                                != center_val):
+                            # Surface band: full convolution
+                            acc = 0
+                            for di in range(kx):
+                                for dj in range(ky):
+                                    for dk in range(kz_dim):
+                                        if kernel[di, dj, dk] == 0:
+                                            continue
+                                        slab_fi = ((pi - 1) + di) * str_val
+                                        slab_fj = ((pj - 1) + dj) * str_val
+                                        src_val = slab_ptr[
+                                            dk_off[dk] +
+                                            slab_fi * slab_ry_dim + slab_fj]
+                                        acc = acc + <short>(
+                                            <short>src_val *
+                                            <short>kernel[di, dj, dk])
+                            conv_val = <int>acc
+                            if conv_val > 127:
+                                conv_val = 127
+                            elif conv_val < -128:
+                                conv_val = -128
+                            slice_b[pi, pj] = <signed char>conv_val
+                            band_b[pi, pj] = 1  # OPT 15: surface
+                        else:
+                            # Interior/exterior: branchless constant fill
+                            slice_b[pi, pj] = <signed char>(
+                                <int>center_val * 127 +
+                                (<int>center_val >> 7))
+                            band_b[pi, pj] = 0  # OPT 15: non-surface
+    
     # --- Init face-layer jump table ---
     # layer_jstride[L] = number of floats per i-row in layer L
     layer_jstride[0] = py * 3       # lax: (px-1, py, 3)
@@ -3203,6 +3269,22 @@ def fused_stl_export(
                 slice_c = slice_c_np
                 band_c_np[:] = 0  # OPT 15: boundary slice has no surface
                 band_c = band_c_np
+            elif use_sdf:
+                # SDF input: compute slice_c directly from padded SDF
+                with nogil:
+                    for pi in prange(px, num_threads=n_threads,
+                                     schedule='dynamic', chunksize=4):
+                        for pj in range(py):
+                            if (pi == 0 or pi == px - 1 or
+                                    pj == 0 or pj == py - 1):
+                                slice_c[pi, pj] = -1
+                                band_c[pi, pj] = 0
+                            else:
+                                slice_c[pi, pj] = _conv_at_sdf(
+                                    sdf_ptr, sdf_yz, sdf_z,
+                                    pi, pj, k + 2, krx,
+                                    kern_ptr, kx, ky, kz_dim, kern_jk)
+                                band_c[pi, pj] = 1
             else:
                 conv_k = k + 2 - 1
                 evict_slot = (conv_k - 1) % kz_dim
@@ -3673,6 +3755,7 @@ def fused_mesh_export(
     float isovalue=0.0,
     int n_threads=0,
     int mc_threads=0,
+    const signed char[:, :, ::1] sdf_input=None,
 ):
     """Fully fused mesh export: packed bits -> (vertices, faces) arrays.
 
@@ -3792,6 +3875,17 @@ def fused_mesh_export(
     cdef pthread_t mc_thread
     cdef float *tmp_fl_ptr
     cdef int *tmp_id_ptr
+    # --- SDF input support (CDT precision path) ---
+    cdef int use_sdf = 0
+    cdef signed char *sdf_ptr = NULL
+    cdef int sdf_yz = 0, sdf_z = 0
+    cdef const signed char *kern_ptr = &kernel[0, 0, 0]
+    cdef int kern_jk = ky * kz_dim
+    cdef signed char[:, :, ::1] _sdf_mv_m
+    cdef signed char[:, :, ::1] slab_view
+    cdef float *layer_ptrs[5]
+    cdef int layer_jstride[5]
+    cdef int nv_final, nf_final
 
     # Slab buffer variables (OPT 9)
     cdef int pad_x = krx * str_val
@@ -3813,71 +3907,100 @@ def fused_mesh_export(
         # Empirically: conv=14,mc=2 optimal on 16-core (Gyroid 0.72x of STL).
         mc_threads = max(1, min(total_cores // 4, py - 1))
 
-    # --- OPT 9: Slab buffer allocation and initial extraction ---
-    slab_np = np.full((kz_dim, slab_rx_dim, slab_ry_dim), -1, dtype=np.int8)
-    cdef signed char[:, :, ::1] slab_view = slab_np
-    slab_ptr = &slab_view[0, 0, 0]
+    # --- SDF input path setup (for CDT precision path) ---
+    if sdf_input is not None:
+        use_sdf = 1
+        _sdf_pad_np_m = np.pad(
+            np.asarray(sdf_input), krx,
+            mode='constant', constant_values=np.int8(-128))
+        _sdf_pad_np_m = np.ascontiguousarray(_sdf_pad_np_m, dtype=np.int8)
+        _sdf_mv_m = _sdf_pad_np_m
+        sdf_ptr = &_sdf_mv_m[0, 0, 0]
+        sdf_yz = _sdf_pad_np_m.shape[1] * _sdf_pad_np_m.shape[2]
+        sdf_z = _sdf_pad_np_m.shape[2]
 
-    conv_k = 0
-    for dk in range(kz_dim):
-        src_z = (conv_k + dk - krz) * str_val
-        if src_z < 0 or src_z >= <int>rz:
-            continue
-        slab_slot = (conv_k + dk) % kz_dim
+
+    # --- SDF input: compute initial slice_b directly from padded SDF ---
+    if use_sdf:
         with nogil:
-            for xi in prange(<int>rx, num_threads=n_threads, schedule='static'):
-                for yi in range(<int>ry):
-                    slab_bit_idx = (
-                        <long long>xi +
-                        <long long>yi * rx_ll +
-                        <long long>src_z * rxy)
-                    if (src_ptr[slab_bit_idx >> 3] >>
-                            (7 - <int>(slab_bit_idx & 7))) & 1:
-                        slab_ptr[slab_slot * slab_slice_size +
-                                 (xi + pad_x) * slab_ry_dim + (yi + pad_y)] = 1
-
-    # --- Compute initial slice_b (first convolution at z=0) ---
-    for dk in range(kz_dim):
-        dk_off[dk] = ((conv_k + dk) % kz_dim) * slab_slice_size
-    with nogil:
-        for pi in prange(px, num_threads=n_threads, schedule='dynamic', chunksize=4):
-            for pj in range(py):
-                if pi == 0 or pi == px - 1 or pj == 0 or pj == py - 1:
-                    slice_b[pi, pj] = -1
-                else:
-                    # OPT 13: 6-point axis probe
-                    center_sx = ((pi - 1) + krx) * str_val
-                    center_sy = ((pj - 1) + kry) * str_val
-                    center_val = slab_ptr[
-                        dk_off[krz] + center_sx * slab_ry_dim + center_sy]
-                    if (slab_ptr[dk_off[0] + center_sx * slab_ry_dim + center_sy] != center_val
-                        or slab_ptr[dk_off[kz_dim - 1] + center_sx * slab_ry_dim + center_sy] != center_val
-                        or slab_ptr[dk_off[krz] + (pi - 1) * str_val * slab_ry_dim + center_sy] != center_val
-                        or slab_ptr[dk_off[krz] + ((pi - 1) + kx - 1) * str_val * slab_ry_dim + center_sy] != center_val
-                        or slab_ptr[dk_off[krz] + center_sx * slab_ry_dim + (pj - 1) * str_val] != center_val
-                        or slab_ptr[dk_off[krz] + center_sx * slab_ry_dim + ((pj - 1) + ky - 1) * str_val] != center_val):
-                        acc = 0
-                        for di in range(kx):
-                            for dj in range(ky):
-                                for dk in range(kz_dim):
-                                    if kernel[di, dj, dk] == 0:
-                                        continue
-                                    slab_fi = ((pi - 1) + di) * str_val
-                                    slab_fj = ((pj - 1) + dj) * str_val
-                                    src_val = slab_ptr[dk_off[dk] + slab_fi * slab_ry_dim + slab_fj]
-                                    acc = acc + <short>(<short>src_val * <short>kernel[di, dj, dk])
-                        conv_val = <int>acc
-                        if conv_val > 127: conv_val = 127
-                        elif conv_val < -128: conv_val = -128
-                        slice_b[pi, pj] = <signed char>conv_val
-                        band_b[pi, pj] = 1
-                    else:
-                        slice_b[pi, pj] = <signed char>(<int>center_val * 127 + (<int>center_val >> 7))
+            for pi in prange(px, num_threads=n_threads, schedule='dynamic', chunksize=4):
+                for pj in range(py):
+                    if pi == 0 or pi == px - 1 or pj == 0 or pj == py - 1:
+                        slice_b[pi, pj] = -1
                         band_b[pi, pj] = 0
+                    else:
+                        slice_b[pi, pj] = _conv_at_sdf(
+                            sdf_ptr, sdf_yz, sdf_z,
+                            pi, pj, 1, krx,
+                            kern_ptr, kx, ky, kz_dim, kern_jk)
+                        band_b[pi, pj] = 1
 
+    if not use_sdf:
+        # --- OPT 9: Slab buffer allocation and initial extraction ---
+        slab_np = np.full((kz_dim, slab_rx_dim, slab_ry_dim), -1, dtype=np.int8)
+        slab_view = slab_np
+        slab_ptr = &slab_view[0, 0, 0]
+    
+        conv_k = 0
+        for dk in range(kz_dim):
+            src_z = (conv_k + dk - krz) * str_val
+            if src_z < 0 or src_z >= <int>rz:
+                continue
+            slab_slot = (conv_k + dk) % kz_dim
+            with nogil:
+                for xi in prange(<int>rx, num_threads=n_threads, schedule='static'):
+                    for yi in range(<int>ry):
+                        slab_bit_idx = (
+                            <long long>xi +
+                            <long long>yi * rx_ll +
+                            <long long>src_z * rxy)
+                        if (src_ptr[slab_bit_idx >> 3] >>
+                                (7 - <int>(slab_bit_idx & 7))) & 1:
+                            slab_ptr[slab_slot * slab_slice_size +
+                                     (xi + pad_x) * slab_ry_dim + (yi + pad_y)] = 1
+    
+        # --- Compute initial slice_b (first convolution at z=0) ---
+        for dk in range(kz_dim):
+            dk_off[dk] = ((conv_k + dk) % kz_dim) * slab_slice_size
+        with nogil:
+            for pi in prange(px, num_threads=n_threads, schedule='dynamic', chunksize=4):
+                for pj in range(py):
+                    if pi == 0 or pi == px - 1 or pj == 0 or pj == py - 1:
+                        slice_b[pi, pj] = -1
+                    else:
+                        # OPT 13: 6-point axis probe
+                        center_sx = ((pi - 1) + krx) * str_val
+                        center_sy = ((pj - 1) + kry) * str_val
+                        center_val = slab_ptr[
+                            dk_off[krz] + center_sx * slab_ry_dim + center_sy]
+                        if (slab_ptr[dk_off[0] + center_sx * slab_ry_dim + center_sy] != center_val
+                            or slab_ptr[dk_off[kz_dim - 1] + center_sx * slab_ry_dim + center_sy] != center_val
+                            or slab_ptr[dk_off[krz] + (pi - 1) * str_val * slab_ry_dim + center_sy] != center_val
+                            or slab_ptr[dk_off[krz] + ((pi - 1) + kx - 1) * str_val * slab_ry_dim + center_sy] != center_val
+                            or slab_ptr[dk_off[krz] + center_sx * slab_ry_dim + (pj - 1) * str_val] != center_val
+                            or slab_ptr[dk_off[krz] + center_sx * slab_ry_dim + ((pj - 1) + ky - 1) * str_val] != center_val):
+                            acc = 0
+                            for di in range(kx):
+                                for dj in range(ky):
+                                    for dk in range(kz_dim):
+                                        if kernel[di, dj, dk] == 0:
+                                            continue
+                                        slab_fi = ((pi - 1) + di) * str_val
+                                        slab_fj = ((pj - 1) + dj) * str_val
+                                        src_val = slab_ptr[dk_off[dk] + slab_fi * slab_ry_dim + slab_fj]
+                                        acc = acc + <short>(<short>src_val * <short>kernel[di, dj, dk])
+                            conv_val = <int>acc
+                            if conv_val > 127: conv_val = 127
+                            elif conv_val < -128: conv_val = -128
+                            slice_b[pi, pj] = <signed char>conv_val
+                            band_b[pi, pj] = 1
+                        else:
+                            slice_b[pi, pj] = <signed char>(<int>center_val * 127 + (<int>center_val >> 7))
+                            band_b[pi, pj] = 0
+    
     # --- Init face-layer jump table (float32 coords) ---
-    cdef float *layer_ptrs[5]
-    cdef int layer_jstride[5]
+    # layer_ptrs declared above
+    # layer_jstride declared above
     layer_jstride[0] = py * 3       # lax: (px-1, py, 3)
     layer_jstride[1] = (py-1) * 3   # lay: (px, py-1, 3)
     layer_jstride[2] = py * 3       # lbx: (px-1, py, 3)
@@ -3888,7 +4011,7 @@ def fused_mesh_export(
     layer_ptrs[2] = &lbx[0, 0, 0]
     layer_ptrs[3] = &lby[0, 0, 0]
     layer_ptrs[4] = &zed[0, 0, 0]
-
+    
     # --- Init mc_args_t for pthread mesh MC ---
     mc_args.px = px
     mc_args.py = py
@@ -3905,7 +4028,7 @@ def fused_mesh_export(
     for _l in range(5):
         mc_args.layer_ptrs[_l] = layer_ptrs[_l]
         mc_args.layer_jstride[_l] = layer_jstride[_l]
-
+    
     # ID layer pointers
     mc_args.id_layers[0] = &id_lax[0, 0]
     mc_args.id_layers[1] = &id_lay[0, 0]
@@ -3917,7 +4040,7 @@ def fused_mesh_export(
     mc_args.id_jstride[2] = py        # id_lbx: (px-1, py)
     mc_args.id_jstride[3] = py - 1    # id_lby: (px, py-1)
     mc_args.id_jstride[4] = py        # id_zed: (px, py)
-
+    
     # Mesh output buffers
     mc_args.mesh_verts = &verts_mv[0, 0]
     mc_args.mesh_faces = &faces_mv[0, 0]
@@ -3925,7 +4048,7 @@ def fused_mesh_export(
     mc_args.mesh_n_faces = 0
     mc_args.mesh_verts_cap = est_tris
     mc_args.mesh_faces_cap = est_tris
-
+    
     # --- Init pthread pipeline ---
     mc_args.mc_go = 0
     mc_args.mc_finished = 0
@@ -3934,7 +4057,7 @@ def fused_mesh_export(
     pthread_cond_init(&mc_args.slice_ready, NULL)
     pthread_cond_init(&mc_args.mc_done, NULL)
     pthread_create(&mc_thread, NULL, _mc_mesh_thread_func, &mc_args)
-
+    
     # ======= Main Z-sweep: pthread MC on slice pairs + streaming conv =======
     for k in range(pz - 1):
         mc_args.k = k
@@ -3942,7 +4065,7 @@ def fused_mesh_export(
         mc_args.slice_b = &slice_b[0, 0]
         mc_args.band_a = &band_a[0, 0]
         mc_args.band_b = &band_b[0, 0]
-
+    
         # Signal MC thread to process current pair
         with nogil:
             pthread_mutex_lock(&mc_args.mutex)
@@ -3950,7 +4073,7 @@ def fused_mesh_export(
             mc_args.mc_finished = 0
             pthread_cond_signal(&mc_args.slice_ready)
             pthread_mutex_unlock(&mc_args.mutex)
-
+    
         # --- Advance: compute next conv slice into slice_c ---
         if k + 2 < pz:
             if k + 2 >= pz - 1:
@@ -3958,6 +4081,22 @@ def fused_mesh_export(
                 slice_c = slice_c_np
                 band_c_np[:] = 0
                 band_c = band_c_np
+            elif use_sdf:
+                # SDF input: compute slice_c from padded SDF
+                with nogil:
+                    for pi in prange(px, num_threads=n_threads,
+                                     schedule='dynamic', chunksize=4):
+                        for pj in range(py):
+                            if (pi == 0 or pi == px - 1 or
+                                    pj == 0 or pj == py - 1):
+                                slice_c[pi, pj] = -1
+                                band_c[pi, pj] = 0
+                            else:
+                                slice_c[pi, pj] = _conv_at_sdf(
+                                    sdf_ptr, sdf_yz, sdf_z,
+                                    pi, pj, k + 2, krx,
+                                    kern_ptr, kx, ky, kz_dim, kern_jk)
+                                band_c[pi, pj] = 1
             else:
                 conv_k = k + 2 - 1
                 evict_slot = (conv_k - 1) % kz_dim
@@ -4019,15 +4158,15 @@ def fused_mesh_export(
                                     slice_c[pi, pj] = <signed char>(
                                         <int>center_val * 127 + (<int>center_val >> 7))
                                     band_c[pi, pj] = 0
-
-
+    
+    
         # Wait for MC to finish
         with nogil:
             pthread_mutex_lock(&mc_args.mutex)
             while mc_args.mc_finished == 0:
                 pthread_cond_wait(&mc_args.mc_done, &mc_args.mutex)
             pthread_mutex_unlock(&mc_args.mutex)
-
+    
         # --- Check capacity, resize if needed (GIL held) ---
         if mc_args.mesh_n_verts > mc_args.mesh_verts_cap * 3 // 4:
             new_size = mc_args.mesh_verts_cap * 2
@@ -4041,7 +4180,7 @@ def fused_mesh_export(
             faces_mv = faces_np
             mc_args.mesh_faces = &faces_mv[0, 0]
             mc_args.mesh_faces_cap = new_size
-
+    
         # --- Rotate slices and bands ---
         temp_np = slice_a_np
         slice_a_np = slice_b_np
@@ -4050,7 +4189,7 @@ def fused_mesh_export(
         slice_a = slice_a_np
         slice_b = slice_b_np
         slice_c = slice_c_np
-
+    
         temp_np = band_a_np
         band_a_np = band_b_np
         band_b_np = band_c_np
@@ -4058,8 +4197,8 @@ def fused_mesh_export(
         band_a = band_a_np
         band_b = band_b_np
         band_c = band_c_np
-
-
+    
+    
         # --- Swap face-layers: top->bottom, reset top+z (5bbfac1 pattern) ---
         # CRITICAL: Update ALL struct pointers BEFORE memset
         # Swap float32 coord layers
@@ -4075,7 +4214,7 @@ def fused_mesh_export(
         memset(mc_args.id_layers[2], 0xFF, (px - 1) * py * sizeof(int))              # id_lbx
         memset(mc_args.id_layers[3], 0xFF, px * (py - 1) * sizeof(int))              # id_lby
         memset(mc_args.id_layers[4], 0xFF, px * py * sizeof(int))                    # id_zed
-
+    
     # --- Teardown pthread ---
     with nogil:
         pthread_mutex_lock(&mc_args.mutex)
@@ -4086,9 +4225,9 @@ def fused_mesh_export(
         pthread_mutex_destroy(&mc_args.mutex)
         pthread_cond_destroy(&mc_args.slice_ready)
         pthread_cond_destroy(&mc_args.mc_done)
-
-    cdef int nv_final = mc_args.mesh_n_verts
-    cdef int nf_final = mc_args.mesh_n_faces
+    
+    nv_final = mc_args.mesh_n_verts
+    nf_final = mc_args.mesh_n_faces
     verts_np.resize((nv_final, 3), refcheck=False)
     faces_np.resize((nf_final, 3), refcheck=False)
     return verts_np, faces_np
