@@ -24,8 +24,6 @@ resample_and_pack = None
 compute_sdf_cdt = None
 convolve_sdf_spatial = None
 fused_scale_convolve = None
-streaming_mc_mesh = None
-streaming_mc_stl = None
 sweep_mc_mesh = None
 fused_stl_export = None
 fused_mesh_export = None
@@ -42,8 +40,6 @@ try:
         compute_sdf_cdt,
         convolve_sdf_spatial,
         fused_scale_convolve,
-        streaming_mc_mesh,
-        streaming_mc_stl,
         sweep_mc_mesh,
         fused_stl_export,
         fused_mesh_export,
@@ -103,8 +99,6 @@ __all__ = [
     'compute_sdf_cdt',
     'convolve_sdf_spatial',
     'fused_scale_convolve',
-    'streaming_mc_mesh',
-    'streaming_mc_stl',
     'sweep_mc_mesh',
     'fused_stl_export',
     'fused_mesh_export',
