@@ -42,14 +42,18 @@ class BenchmarkManualComposition(BenchmarkBase):
 class BenchmarkTier2CompatibleGrid(BenchmarkBase):
     """Tier 2: compatible-grid intersection (was 19-35x gap, now closed)."""
     name = "tier2_compatible_grid"
-    description = "(Sphere & GyroidCube) — Tier 2 compatible grid path"
+    description = "(Cube & GyroidCube) — Tier 2 same-grid byte-level path"
     workload_type = "mixed"
 
     def setup(self):
         res = RESOLUTIONS[self.size]
         vs = 10.0 / res
-        self.a = Sphere(r=4, voxel_size=vs)
+        # Same origin and voxel_size ensures same-grid fast path
+        self.a = Cube(size=10, voxel_size=vs, center=True)
         self.b = GyroidCube(size=10, voxel_size=vs, center=True)
+        # Must render before boolean op — Tier 1 requires voxel_data
+        self.a.render_volume()
+        self.b.render_volume()
 
     def run(self):
         self.result = self.a & self.b
