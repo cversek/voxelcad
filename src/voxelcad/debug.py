@@ -14,12 +14,15 @@ except ImportError:
     def _SU_MEMORY_SNAPSHOT(): return 0
 
 
-def create_logger(name, level=logging.DEBUG):
+def create_logger(name, level=None):
     #REF: https://docs.python.org/3/howto/logging.html#advanced-logging-tutorial
+    if level is None:
+        import voxelcad.environment as ENV
+        level = getattr(logging, ENV.log_level, logging.WARNING)
     # create logger
     logger = logging.getLogger(name)
     logger.setLevel(level)
-    # create console handler and set level to debug
+    # create console handler with matching level
     ch = logging.StreamHandler()
     ch.setLevel(level)
     # create formatter
