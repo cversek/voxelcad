@@ -1,13 +1,23 @@
 import sys, logging, traceback, os, psutil
 from inspect import currentframe, getframeinfo
 
-# Optional super_utils integration for structured profiling
-try:
-    from super_utils import TIMING_START, TIMING_END, TIMING_EXPORT_JSON
-    from super_utils import MEMORY_SNAPSHOT as _SU_MEMORY_SNAPSHOT
-    HAS_SUPER_UTILS = True
-except ImportError:
+# Optional super_utils integration for structured profiling.
+# Disabled when log_level is WARNING or higher (release default).
+import voxelcad.environment as _ENV
+_profiling_enabled = getattr(logging, _ENV.log_level, logging.WARNING) < logging.WARNING
+
+if _profiling_enabled:
+    try:
+        from super_utils import TIMING_START, TIMING_END, TIMING_EXPORT_JSON
+        from super_utils import MEMORY_SNAPSHOT as _SU_MEMORY_SNAPSHOT
+        HAS_SUPER_UTILS = True
+    except ImportError:
+        HAS_SUPER_UTILS = False
+        _profiling_enabled = False
+else:
     HAS_SUPER_UTILS = False
+
+if not _profiling_enabled:
     def TIMING_START(label): pass
     def TIMING_END(label): pass
     def TIMING_EXPORT_JSON(output_path, **kwargs): return output_path
