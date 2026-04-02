@@ -1,13 +1,38 @@
 import sys, logging, traceback, os, psutil
 from inspect import currentframe, getframeinfo
 
+# Optional super_utils integration for structured profiling.
+# Disabled when log_level is WARNING or higher (release default).
+import voxelcad.environment as _ENV
+_profiling_enabled = getattr(logging, _ENV.log_level, logging.WARNING) < logging.WARNING
 
-def create_logger(name, level=logging.DEBUG):
+if _profiling_enabled:
+    try:
+        from super_utils import TIMING_START, TIMING_END, TIMING_EXPORT_JSON
+        from super_utils import MEMORY_SNAPSHOT as _SU_MEMORY_SNAPSHOT
+        HAS_SUPER_UTILS = True
+    except ImportError:
+        HAS_SUPER_UTILS = False
+        _profiling_enabled = False
+else:
+    HAS_SUPER_UTILS = False
+
+if not _profiling_enabled:
+    def TIMING_START(label): pass
+    def TIMING_END(label): pass
+    def TIMING_EXPORT_JSON(output_path, **kwargs): return output_path
+    def _SU_MEMORY_SNAPSHOT(): return 0
+
+
+def create_logger(name, level=None):
     #REF: https://docs.python.org/3/howto/logging.html#advanced-logging-tutorial
+    if level is None:
+        import voxelcad.environment as ENV
+        level = getattr(logging, ENV.log_level, logging.WARNING)
     # create logger
     logger = logging.getLogger(name)
     logger.setLevel(level)
-    # create console handler and set level to debug
+    # create console handler with matching level
     ch = logging.StreamHandler()
     ch.setLevel(level)
     # create formatter

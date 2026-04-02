@@ -1,45 +1,93 @@
 # VoxelCAD
 
-Pythonic tools for design using numpy arrays and discrete volume elements "voxels" for construction and rendering.  Inspired by OpenSCAD, but addressing some computational efficiencies for complex structures.
+Voxel-based 3D modeling in Python. Design with boolean operations, export to STL for 3D printing.
 
-Support for mathematically defined volume structures is emphasized, setting this package apart from surface mesh based CAD tools.  For instance, rendering and operating on dense gyroid structures is relatively quick in voxel representation as we need not get bogged down in complex mesh merges.  However, building simply structured (e.g. fully solid) models with voxels is rather memory and time inefficient.  Surface mesh structures can be generated for display and export purposes.  In the future we hope to add the ability to perform more detailed operations on meshes and to switch between voxel and surface mesh representations, in order to, hopefully, permit design flows using the best of both worlds!
+VoxelCAD represents geometry as packed boolean arrays instead of surface meshes. This makes complex structures — gyroids, lattices, intersections of implicit surfaces — as easy to combine as simple primitives. No mesh merges, no manifold repair, no topology headaches.
+
+## Gallery
+
+| Sphere | Gyroid Cube | Gyroid & Cylinder | Cube - Sphere |
+|--------|-------------|-------------------|---------------|
+| ![](images/sphere_256.png) | ![](images/gyroid_cube_256.png) | ![](images/gyroid_and_cylinder_256.png) | ![](images/cube_minus_sphere_256.png) |
+
+All renders produced with PyVista offscreen at resolution 256.
+
+## Quick Start: Ice Cream Cone Demo
+
+The `examples/ice_cream_cone_demo.ipynb` notebook demonstrates the full VoxelCAD pipeline — CSG booleans, coordinate transforms, and mesh export in a few lines:
+
+<img src="images/ice_cream_transforms_256.png" alt="ice cream cone with CSG transforms" width="600"/>
+
+```python
+from voxelcad import Sphere, Cylinder
+
+scoop = Sphere(3)
+cone = Cylinder(h=8, r1=3, r2=0.3)
+scoop_up = scoop.translate([0, 0, 4])
+ice_cream = scoop_up | cone
+
+ice_cream.plot()
+ice_cream.export("ice_cream.stl")
+```
+
+## Features
+
+- **Boolean operations**: union (`|`), intersection (`&`), difference (`-`), XOR (`^`), inversion (`~`)
+- **Transforms**: translate, rotate, scale — composable, lazy, applied at render time via inverse transform matrices
+- **Primitives**: Sphere, Cube, Cylinder (with taper), GyroidCube, WigglyGyroidCube, HyperWigglyGyroidCube
+- **Export**: STL mesh via PyVista, with optional mesh repair
+- **Packed storage**: 8x memory reduction (1 GB bool → 128 MB uint8 at 1024^3)
 
 ## Visuals
+
 The following screen capture demo illustrates a basic design for mesh model export workflow:
 
 ![](images/demo1.png)
 
-Complex models can be created and exported for 3D printing with compact one-liners using the `VoxelCAD Shell`, if one so chooses.  
+Complex models can be created and exported for 3D printing with compact one-liners:
 ```python
-(GyroidCube(10,res=256,center=True,lattice_param=1.0,thresh1=-0.1,thresh2=0.1) & Cylinder(h=5,r=5,center=True)).export("model.stl") #makes a gyroid cube, intersects with cylinder, exports as STL
+(GyroidCube(10, res=256, center=True, lattice_param=1.0, thresh1=-0.1, thresh2=0.1) & Cylinder(h=5, r=5, center=True)).export("model.stl")
 ```
 
-The following image is of the part made with a Formlabs Form3 SLA 3D printer using Flexible 80A resin.  The result is lightweight, compressible, and resilient.
+The following image is of the part made with a Formlabs Form3 SLA 3D printer using Flexible 80A resin. The result is lightweight, compressible, and resilient.
 
 <img src="images/gyroid_cylinder_3d_print_form3_flexible80A.jpg" alt="3d printed gyroid cylinder" width="512"/>
 
-## Installation with Conda Environment
-Setup dependencies:
-```
-conda create -n voxelcad
-conda activate voxelcad
-conda install -c conda-forge pyvista ipython tqdm
-```
-In package root with `setup.py` file:
-```
-pip install -e .
+## Performance
 
+Cython kernels with OpenMP parallelism fuse geometry evaluation, thresholding, and bit-packing into a single pass. No intermediate arrays.
+
+*Benchmarked on Apple M3 Max (12 P-cores, 36 GB RAM):*
+
+| Operation | NumPy | Cython (parallel) | Speedup |
+|-----------|-------|--------------------|---------|
+| Geometry eval + pack (sphere, 1024^3) | 4.7 s | 80 ms | 60x |
+| Resample + nearest-neighbor | 160 ms | 4.2 ms | 38x |
+| CSG boolean (same grid) | 8.7 ms | 3.1 ms | 2.8x |
+
+Memory: ~50 MB peak (Cython streaming) vs ~4.6 GB (NumPy vectorized).
+
+## Installation
+
+```bash
+pip install -e ".[viz,dev]"
+python setup.py build_ext --inplace
 ```
-Note, as of 2023-07-19 the dependency `pymeshfix` is broken in conda supported releases up to `0.16.1`, so we can get from the source repo:
-```
-git clone https://github.com/pyvista/pymeshfix.git
-cd pymeshfix
-git checkout v0.16.2
-pip install -e .
-``` 
+
+The second command compiles Cython extensions for 10-60x speedup. Without it, VoxelCAD falls back to NumPy with a warning.
+
+**Requirements**: Python 3.9+, NumPy. Optional: Cython (10-60x speedup), PyVista (visualization), scipy (CDT fallback).
+
+## Documentation
+
+- **[User Guide](docs/user/)** — Getting started, geometry catalog, boolean operations, transforms
+- **[Developer Guide](docs/developer/)** — Adding primitives, testing, build system, contributing
+- **[Architecture Guide](docs/architecture/)** — Optimization tiers, storage format, query planner, memory model
 
 ## Authors and acknowledgment
-"Craig Versek" <cversek@gmail.com>
+
+Craig Wm. Versek <cversek@gmail.com>
 
 ## License
+
 MIT

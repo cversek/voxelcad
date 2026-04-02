@@ -1,10 +1,15 @@
-from voxelcad.gyroid_cube import GyroidCube
-from voxelcad.cylinder import Cylinder
-import voxelcad.environment as ENV
+"""Gyroid Electrode Support Plug — real-world multi-component assembly.
+
+A functional part design: gyroid body for flexibility, tapered plug
+for friction fit, and stem connecting them.  Demonstrates multi-component
+union, tapered cylinders (r1/r2), and parameterized export.
+
+Usage:
+    python -c "from gyroid_electrode_support_plug_conn import export; export()"
+"""
+from voxelcad import GyroidCube, Cylinder, ENV
 
 RES = 1024
-SMOOTH_ITERS     = 1000
-DOWNSAMPLE_TIMES = 5
 
 BODY_H = 5
 BODY_R = 3
@@ -39,13 +44,10 @@ plug_taper = Cylinder(h=PLUG_TAPER_H,r1=PLUG_TAPER_R1,r2=PLUG_TAPER_R2).translat
 # print("Combining components...")
 model = plug_taper | plug | stem | body  #righthand side is the bottom of the Z stack
 
-def export(filename = f"gyroid_electrode_support_plug_conn_GLP{GC_LP:0.2f}_PLUG_D{PLUG_D:0.2f}_RES{RES}_DS{DOWNSAMPLE_TIMES}.stl", show=False):
-    print("Rendering surface model...")
-    model_surf = model.render_surface_mesh(
-        smooth_iters = SMOOTH_ITERS,
-        downscale_times = DOWNSAMPLE_TIMES,
-        only_largest_component = True,
-    )
+def export(filename = f"gyroid_electrode_support_plug_conn_GLP{GC_LP:0.2f}_PLUG_D{PLUG_D:0.2f}_RES{RES}.stl", show=True):
+    print("Rendering surface model via EDT...")
+    model_surf = model.render_surface_mesh_edt(only_largest_component=True)
     model_surf.save(filename)
+    print(f"Saved: {filename}")
     if show:
-        model_surf.plot(color='white',show_edges=True)
+        model_surf.plot(color='white', show_edges=True)

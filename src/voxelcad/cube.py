@@ -4,40 +4,76 @@ import voxelcad.environment as ENV
 
 from voxelcad.voxel_model import VoxelModel
 from voxelcad.voxel_grid  import VoxelGrid
+from voxelcad._kernels import evaluate_and_pack_cube
 
-from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED
+from voxelcad.debug import currentframe, DEBUG_TAG, DEBUG_EMBED, TIMING_START, TIMING_END, MEMORY_USAGE
 
 class Cube(VoxelModel):
     def __init__(self, size, voxel_size=None, center=False, **kwargs):
         super().__init__(**kwargs)
         self.size = np.array(size)*np.ones(3)
+        # Pad grid by 1 voxel on each side so SDF zero-crossing
+        # never touches the grid boundary (adds 2 voxels per axis)
+        vs = voxel_size if voxel_size is not None else ENV.voxel_size
+        pad = float(np.atleast_1d(vs)[0])
         #set up grid dimensions
         if center:
             sx,sy,sz = self.size/2
-            self.grid = VoxelGrid(xlim=(-sx,sx),
-                                  ylim=(-sy,sy),
-                                  zlim=(-sz,sz),
+            self.grid = VoxelGrid(xlim=(-sx-pad,sx+pad),
+                                  ylim=(-sy-pad,sy+pad),
+                                  zlim=(-sz-pad,sz+pad),
                                   voxel_size=voxel_size)
         else:
             sx,sy,sz = self.size
-            self.grid = VoxelGrid(xlim=(0,sx),
-                                  ylim=(0,sy),
-                                  zlim=(0,sz),
+            self.grid = VoxelGrid(xlim=(0-pad,sx+pad),
+                                  ylim=(0-pad,sy+pad),
+                                  zlim=(0-pad,sz+pad),
                                   voxel_size=voxel_size)
-        
-    def render_volume(self):
-        super().render_volume() # will construct_grid if it is None
-        # fill all of the cubic volume between the margins
-        X,Y,Z = self.grid.construct_mesh()
-        #DEBUG_TAG(currentframe());DEBUG_EMBED(local_ns=locals(),global_ns=globals())
-        sx,sy,sz = self.size
-        cx,cy,cz = self.grid.compute_center_vector()
-        V = (np.abs(X-cx) <= sx/2) &\
-            (np.abs(Y-cy) <= sy/2) &\
-            (np.abs(Z-cz) <= sz/2)
-        #V = np.packbits(V)
-        self.voxel_data = V
-        return self.voxel_data
+
+    def _render_cython(self, grid, M4inv=None):
+        """Cython fused evaluate-and-pack for cube geometry."""
+        if evaluate_and_pack_cube is None:
+            if ENV.use_cython:
+                import warnings
+                warnings.warn(
+                    "Cube: Cython kernel unavailable, falling back to NumPy",
+                    RuntimeWarning, stacklevel=3,
+                )
+            return self._render_numpy(grid, M4inv)
+        TIMING_START("cube_render_cython")
+        xcc, ycc, zcc = grid.compute_cell_center_ranges()
+        cx, cy, cz = self.grid.compute_center_vector()
+        sx, sy, sz = self.size
+        result = evaluate_and_pack_cube(
+            xcc, ycc, zcc, cx, cy, cz,
+            sx / 2.0, sy / 2.0, sz / 2.0,
+            M4inv=M4inv,
+        )
+        TIMING_END("cube_render_cython")
+        return result
+
+    def _render_numpy(self, grid, M4inv=None):
+        """NumPy per-slice geometry evaluation for cube."""
+        TIMING_START("cube_render_numpy")
+        cx, cy, cz = self.grid.compute_center_vector()
+        sx, sy, sz = self.size
+        hsx, hsy, hsz = sx/2, sy/2, sz/2
+        rx, ry, rz = [int(r) for r in grid.res_vector]
+        V = np.zeros((rx, ry, rz), dtype='bool')
+        for X_2d, Y_2d, z_val, k in grid.iter_slices():
+            if M4inv is not None:
+                Z_2d = np.full_like(X_2d, z_val)
+                Xp = M4inv[0,0]*X_2d + M4inv[0,1]*Y_2d + M4inv[0,2]*Z_2d + M4inv[0,3]
+                Yp = M4inv[1,0]*X_2d + M4inv[1,1]*Y_2d + M4inv[1,2]*Z_2d + M4inv[1,3]
+                Zp = M4inv[2,0]*X_2d + M4inv[2,1]*Y_2d + M4inv[2,2]*Z_2d + M4inv[2,3]
+            else:
+                Xp, Yp, Zp = X_2d, Y_2d, z_val
+            V[:, :, k] = ((np.abs(Xp-cx) <= hsx) &
+                          (np.abs(Yp-cy) <= hsy) &
+                          (np.abs(Zp-cz) <= hsz))
+        result = np.packbits(V.ravel(order='F'), bitorder='big')
+        TIMING_END("cube_render_numpy")
+        return result
 
 ################################################################################
 # TEST CODE
@@ -45,11 +81,4 @@ class Cube(VoxelModel):
 if __name__ == "__main__":
     M = Cube(10,res=32)
     M.plot(show=True)
-    M.export("test_model_cube10.png")
     M.export("test_model_cube10.stl")
-    M.export("test_model_cube10.nii")
-    M = Cube([10,20,30],res=32)
-    M.plot(show=True)
-    M.export("test_model_cube10x20x30.png")
-    M.export("test_model_cube10x20x30.stl")
-    M.export("test_model_cube10x20x30.nii")
