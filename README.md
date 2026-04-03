@@ -32,11 +32,15 @@ ice_cream.export("ice_cream.stl")
 
 ## Features
 
-- **Boolean operations**: union (`|`), intersection (`&`), difference (`-`), XOR (`^`), inversion (`~`)
+- **Smoothed mesh export**: VoxelCAD's STL pipeline converts voxel geometry into clean, smooth triangle meshes without the stairstep artifacts typical of voxel-based models. A signed distance field and frequency-domain Butterworth filter remove high-frequency staircase noise while preserving geometric detail, producing fairly regular triangle meshes suitable for 3D printing and simulation. No external mesh repair tools needed — the pipeline is self-contained and streams directly from packed voxel data to binary STL.
+- **Boolean operations**: union (`|`), intersection (`&`), difference (`-`), XOR (`^`), inversion (`~`) with three-tier dispatch — byte-level bitwise ops for same-grid operands, grid-compatible render path, and full CSG tree evaluation with query planning
 - **Transforms**: translate, rotate, scale — composable, lazy, applied at render time via inverse transform matrices
 - **Primitives**: Sphere, Cube, Cylinder (with taper), GyroidCube, WigglyGyroidCube, HyperWigglyGyroidCube
-- **Export**: STL mesh via PyVista, with optional mesh repair
 - **Packed storage**: 8x memory reduction (1 GB bool → 128 MB uint8 at 1024^3)
+
+### Planned features
+
+- **Intelligent triangle merging**: Coplanar and near-coplanar triangle consolidation to produce compact mesh models for resource-constrained applications (embedded viewers, web, mobile)
 
 ## Visuals
 
