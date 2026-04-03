@@ -14,17 +14,21 @@ All renders produced with PyVista offscreen at resolution 256.
 
 ## Quick Start: Ice Cream Cone Demo
 
-The `examples/ice_cream_cone_demo.ipynb` notebook demonstrates the full VoxelCAD pipeline — CSG booleans, coordinate transforms, and mesh export in a few lines:
+The `examples/ice_cream_cone_demo.ipynb` notebook demonstrates the full VoxelCAD pipeline — CSG booleans, gyroid textures, coordinate transforms, and mesh export:
 
 <img src="images/ice_cream_transforms_256.png" alt="ice cream cone with CSG transforms" width="600"/>
 
 ```python
-from voxelcad import Sphere, Cylinder
+from voxelcad import Sphere, Cylinder, GyroidCube
 
-scoop = Sphere(3)
-cone = Cylinder(h=8, r1=3, r2=0.3)
+# Gyroid-textured scoop — the headline feature
+sphere = Sphere(r=3)
+gyroid = GyroidCube(size=6, center=True)
+scoop = sphere & gyroid  # CSG intersection gives organic texture
+
+cone = Cylinder(h=8, r1=0, r2=3, center=True)
 scoop_up = scoop.translate([0, 0, 4])
-ice_cream = scoop_up | cone
+ice_cream = cone | scoop_up
 
 ice_cream.plot()
 ice_cream.export("ice_cream.stl")
