@@ -80,9 +80,25 @@ The second command compiles Cython extensions for 10-60x speedup. Without it, Vo
 
 ## Documentation
 
-- **[User Guide](docs/user/)** — Getting started, geometry catalog, boolean operations, transforms
-- **[Developer Guide](docs/developer/)** — Adding primitives, testing, build system, contributing
-- **[Architecture Guide](docs/architecture/)** — Optimization tiers, storage format, query planner, memory model
+**User Guide**:
+- [Getting Started](docs/user/getting-started.md) — First model, rendering, export
+- [Geometry Catalog](docs/user/geometry-catalog.md) — All primitives with examples
+- [Boolean Operations](docs/user/boolean-operations.md) — Union, intersection, difference, XOR
+- [Transforms](docs/user/transforms.md) — Translate, rotate, scale, chaining
+- [Performance Guide](docs/user/performance-guide.md) — Resolution selection, Cython acceleration
+- [Troubleshooting](docs/user/troubleshooting.md) — Common issues and fixes
+
+**Developer Guide**:
+- [Extension Guide](docs/developer/extension-guide.md) — Adding new primitives and operations
+- [Testing Strategy](docs/developer/testing-strategy.md) — Test organization and running
+- [Build System](docs/developer/build-system.md) — Cython compilation, packaging
+
+**Architecture Guide**:
+- [Optimization System](docs/architecture/optimization-system.md) — 3-tier dispatch, fallback paths
+- [Storage Format](docs/architecture/storage-format.md) — Packed boolean arrays, memory layout
+- [Query Planner](docs/architecture/query-planner.md) — CSG operation optimization
+- [Memory Model](docs/architecture/memory-model.md) — Streaming vs vectorized allocation
+- [GPU Design](docs/architecture/gpu-design.md) — Future GPU acceleration roadmap
 
 ## Authors and acknowledgment
 
