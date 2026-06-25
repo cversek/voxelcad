@@ -1050,22 +1050,35 @@ class CSGModel(VoxelModel):
         self.right = right
 
     def _collect_leaves(self, leaves, ops):
-        """Recursively collect leaf models and operations (postfix order)."""
+        """Recursively collect leaf models and operations (postfix order).
+
+        Returns a reference token used as an operand by the parent op:
+          - ref >= 0 → leaf index (also the position in the runtime stack,
+            which starts with all N rendered leaves at indices 0..N-1).
+          - ref <  0 → op result; the k-th op (0-indexed) produces
+            stack[N + k] and is encoded here as -(k + 1).
+
+        Storing the result as a leaf-count-and-ops-count sum at emit time
+        (the prior approach) was incorrect: subsequent sibling subtrees
+        continue to append leaves, so any operand that resolved via that
+        sum landed on a stale leaf rather than the intended op result.
+        See upstream issue #3.
+        """
         if isinstance(self.left, CSGModel):
-            left_idx = self.left._collect_leaves(leaves, ops)
+            left_ref = self.left._collect_leaves(leaves, ops)
         else:
-            left_idx = len(leaves)
+            left_ref = len(leaves)
             leaves.append(LeafNode(self.left, self.left.grid))
 
         if isinstance(self.right, CSGModel):
-            right_idx = self.right._collect_leaves(leaves, ops)
+            right_ref = self.right._collect_leaves(leaves, ops)
         else:
-            right_idx = len(leaves)
+            right_ref = len(leaves)
             leaves.append(LeafNode(self.right, self.right.grid))
 
-        result_idx = len(leaves) + len(ops)
-        ops.append((self.op, left_idx, right_idx))
-        return result_idx
+        op_idx = len(ops)
+        ops.append((self.op, left_ref, right_ref))
+        return -(op_idx + 1)
 
     def _plan_execution(self):
         """Build execution plan: collect leaves, compute common grid."""
@@ -1099,10 +1112,18 @@ class CSGModel(VoxelModel):
                 packed = leaf.model.render_on_grid(common_grid)
             rendered.append(packed)
 
-        # Postfix combination with byte-level ops
+        # Postfix combination with byte-level ops.
+        # Operand refs: >=0 → leaf index; <0 → op result, position = N + (-ref - 1).
+        n_leaves = len(rendered)
         stack = list(rendered)
-        for op, left_idx, right_idx in plan.operations:
-            result = self._BYTEWISE_OP_MAP[op](stack[left_idx], stack[right_idx])
+
+        def _resolve(ref):
+            return ref if ref >= 0 else n_leaves + (-ref - 1)
+
+        for op, left_ref, right_ref in plan.operations:
+            result = self._BYTEWISE_OP_MAP[op](
+                stack[_resolve(left_ref)], stack[_resolve(right_ref)]
+            )
             stack.append(result)
 
         self.voxel_data = stack[-1]
